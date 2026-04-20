@@ -1,0 +1,40 @@
+[project]
+name = "embeint-htf-station"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Karl Von Richter", email = "karl@embeint.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "aiomqtt>=2.5.1",
+    "click>=8.3.2",
+    "pydantic>=2.13.2",
+    "pydantic-settings>=2.13.1",
+    "structlog>=25.5.0",
+]
+
+[project.scripts]
+embeint-htf-station = "embeint_htf_station:main"
+htf-station = "embeint_htf_station:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.10.7,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.11",
+]
