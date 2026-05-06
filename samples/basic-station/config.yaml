@@ -1,0 +1,21 @@
+# MQTT connection details. Values come from the environment so this file can be
+# committed safely and reused across stations.
+mqtt:
+  host: ${HTF_MQTT_HOST:-localhost}
+  port: ${HTF_MQTT_PORT:-1883}
+  username: ${HTF_MQTT_USERNAME:-}
+  password: ${HTF_MQTT_PASSWORD:-}
+
+server:
+  api_base_url: ${HTF_API_BASE_URL:-http://localhost:5080}
+  station_key: ${HTF_API_KEY:-}
+
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+
+stages:
+  - name: print testing
+    kind: print
+    message: testing
+    wait_seconds: 5

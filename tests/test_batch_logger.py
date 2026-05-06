@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from embeint_htf_station.messaging.batch_logger import BatchLogger
+from embeint_htf_station.stations.basic import StageScopedLogger
 
 
 @dataclass
@@ -35,3 +36,22 @@ async def test_flush_on_interval() -> None:
     await asyncio.sleep(BatchLogger.FLUSH_INTERVAL_S * 1.5)
     await logger.stop()
     assert len(client.published) >= 1
+
+
+@pytest.mark.asyncio
+async def test_stage_scoped_logger_formats_stage_output(capsys: pytest.CaptureFixture[str]) -> None:
+    client = _FakeClient()
+    logger = BatchLogger(client, "test/topic")
+    stage_logger = StageScopedLogger(logger, "print testing")
+
+    await stage_logger.start()
+    await stage_logger.log("info", "testing")
+    await logger.stop()
+
+    assert len(client.published) == 1
+    payload = json.loads(client.published[0][1])
+    assert payload["entries"][0]["msg"] == "=======print testing======="
+    assert payload["entries"][1]["msg"].endswith("[print testing] - testing")
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "=======print testing======="
+    assert out[1].endswith("[print testing] - testing")
