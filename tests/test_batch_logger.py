@@ -55,3 +55,19 @@ async def test_stage_scoped_logger_formats_stage_output(capsys: pytest.CaptureFi
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "=======print testing======="
     assert out[1].endswith("[print testing] - testing")
+
+
+@pytest.mark.asyncio
+async def test_stage_scoped_logger_strips_ansi_escape_sequences(capsys: pytest.CaptureFixture[str]) -> None:
+    client = _FakeClient()
+    logger = BatchLogger(client, "test/topic")
+    stage_logger = StageScopedLogger(logger, "Validation")
+
+    await stage_logger.log("info", "\x1b[1;33m<wrn> modem warning\x1b[0m")
+    await logger.stop()
+
+    payload = json.loads(client.published[0][1])
+    assert payload["entries"][0]["msg"].endswith("[Validation] - <wrn> modem warning")
+    assert "\x1b" not in payload["entries"][0]["msg"]
+    out = capsys.readouterr().out
+    assert "\x1b" not in out

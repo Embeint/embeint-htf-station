@@ -14,6 +14,26 @@ class StageSettings(BaseModel):
     kind: str = "print"
     message: str = "testing"
     wait_seconds: float = 5.0
+    programmer: str | None = None
+    firmware_id: str | None = None
+    firmware_version: str = "latest"
+    path: str | None = None
+    number_of_tests: int | None = None
+    test_timeout_seconds: float = 60.0
+    tests: tuple[str, ...] = ()
+    rtt_command: tuple[str, ...] = ()
+    rtt_channel: int = 0
+    rtt_telnet_port: int = 19021
+    reset_before_capture: bool = True
+
+
+class ProgrammerSettings(BaseModel):
+    name: str
+    kind: str
+    serial_number: str | int | None = None
+    target_device: str | None = None
+    rtt_channel: int = 0
+    rtt_telnet_port: int = 19021
 
 
 class Settings(BaseSettings):
@@ -26,9 +46,11 @@ class Settings(BaseSettings):
 
     api_base_url: str = "http://localhost:5080"
     station_key: str | None = None
+    firmware_cache_dir: str = ".htf-cache/firmware"
 
     org_id: str = Field(..., description="UUID of the org this station belongs to")
     station_id: str = Field(..., description="UUID assigned to this station by the server")
+    programmers: tuple[ProgrammerSettings, ...] = ()
     stages: tuple[StageSettings, ...] = Field(default_factory=lambda: (
         StageSettings(name="print testing"),
     ))
@@ -66,8 +88,10 @@ def load_settings_from_yaml(path: Path) -> Settings:
         broker_password=_optional_str(mqtt.get("password")),
         api_base_url=str(server.get("api_base_url", "http://localhost:5080")),
         station_key=_optional_str(server.get("station_key")),
+        firmware_cache_dir=str(server.get("firmware_cache_dir", ".htf-cache/firmware")),
         org_id=str(_required(station, "org_id")),
         station_id=str(_required(station, "station_id")),
+        programmers=parse_programmer_settings(data),
         stages=parse_stage_settings(data),
     )
 
@@ -103,12 +127,56 @@ def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
             kind=str(raw_stage.get("kind", "print")),
             message=str(raw_stage.get("message", "testing")),
             wait_seconds=float(raw_stage.get("wait_seconds", raw_stage.get("waitSeconds", 5))),
+            programmer=_optional_str(raw_stage.get("programmer")),
+            firmware_id=_optional_str(raw_stage.get("firmware_id", raw_stage.get("firmwareId"))),
+            firmware_version=str(raw_stage.get("firmware_version", raw_stage.get("firmwareVersion", "latest"))),
+            path=_optional_str(raw_stage.get("path")),
+            number_of_tests=_optional_int(raw_stage.get("number_of_tests", raw_stage.get("numberOfTests"))),
+            test_timeout_seconds=float(
+                raw_stage.get("test_timeout_seconds", raw_stage.get("testTimeoutSeconds", 60)),
+            ),
+            tests=_str_tuple(raw_stage.get("tests")),
+            rtt_command=_str_tuple(raw_stage.get("rtt_command", raw_stage.get("rttCommand"))),
+            rtt_channel=int(raw_stage.get("rtt_channel", raw_stage.get("rttChannel", 0))),
+            rtt_telnet_port=int(raw_stage.get("rtt_telnet_port", raw_stage.get("rttTelnetPort", 19021))),
+            reset_before_capture=bool(
+                raw_stage.get("reset_before_capture", raw_stage.get("resetBeforeCapture", True)),
+            ),
         ))
 
     if not stages:
         raise ConfigError("Config section 'stages' must contain at least one stage")
 
     return tuple(stages)
+
+
+def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings, ...]:
+    raw_programmers = data.get("programmers")
+    if raw_programmers is None:
+        return ()
+    if not isinstance(raw_programmers, list):
+        raise ConfigError("Config section 'programmers' must be a list")
+
+    programmers: list[ProgrammerSettings] = []
+    for index, raw_programmer in enumerate(raw_programmers, start=1):
+        if not isinstance(raw_programmer, dict):
+            raise ConfigError(f"Config programmer {index} must be a mapping")
+        name = raw_programmer.get("name")
+        kind = raw_programmer.get("kind")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(f"Config programmer {index} requires a non-empty name")
+        if not isinstance(kind, str) or not kind.strip():
+            raise ConfigError(f"Config programmer {index} requires a non-empty kind")
+        programmers.append(ProgrammerSettings(
+            name=name.strip(),
+            kind=kind.strip(),
+            serial_number=raw_programmer.get("serial_number", raw_programmer.get("serialNumber")),
+            target_device=_optional_str(raw_programmer.get("target_device", raw_programmer.get("targetDevice"))),
+            rtt_channel=int(raw_programmer.get("rtt_channel", raw_programmer.get("rttChannel", 0))),
+            rtt_telnet_port=int(raw_programmer.get("rtt_telnet_port", raw_programmer.get("rttTelnetPort", 19021))),
+        ))
+
+    return tuple(programmers)
 
 
 def _parse_simple_yaml_text(text: str, path: Path) -> dict[str, Any]:
@@ -250,6 +318,12 @@ def _expand_env(value: str, path: Path, line_no: int) -> str:
 
 def _coerce_scalar(value: str) -> str | int | float | bool | None:
     value = _strip_quotes(value)
+    if value.startswith("[") and value.endswith("]"):
+        return [
+            _coerce_scalar(item.strip())
+            for item in value[1:-1].split(",")
+            if item.strip()
+        ]
     lowered = value.lower()
     if lowered in {"null", "~"}:
         return None
@@ -298,3 +372,17 @@ def _optional_str(value: Any) -> str | None:
     if value is None or value == "":
         return None
     return str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _str_tuple(value: Any) -> tuple[str, ...]:
+    if value is None or value == "":
+        return ()
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return (str(value).strip(),)

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -12,11 +13,16 @@ from urllib.request import Request, urlopen
 import structlog
 
 from embeint_htf_station.config import ConfigError, Settings, parse_stage_settings_from_yaml_text
+from embeint_htf_station.firmware import FirmwareCache
 from embeint_htf_station.messaging.batch_logger import BatchLogger
 from embeint_htf_station.messaging.client import connect
 from embeint_htf_station.stages import StageFactory, StageResult, create_stage, default_stage_factories
+from embeint_htf_station.stages.infuse_validation import InfuseValidationHook, InfuseValidationStage
+from embeint_htf_station.stages.nrfutil import FirmwareFlashStage, NrfutilDeviceRecoverStage, NrfutilDeviceResetStage
 
 log = structlog.get_logger(__name__)
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 class _Publisher(Protocol):
@@ -52,19 +58,38 @@ class StageScopedLogger:
 
     async def log(self, level: str, msg: str) -> None:
         timestamp = datetime.now(UTC).isoformat(timespec="milliseconds")
+        msg = _sanitize_log_text(msg)
         formatted = f"[{timestamp}][{self._stage_name}] - {msg}"
         print(formatted)
         await self._logger.log(level, formatted)
 
 
+def _sanitize_log_text(value: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", value).replace("\x00", "")
+
+
 class BasicStation:
     """Minimal station used to validate the server-to-station pipeline."""
 
-    def __init__(self, settings: Settings, stage_factories: Mapping[str, StageFactory] | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        stage_factories: Mapping[str, StageFactory] | None = None,
+        infuse_validation_hooks: Sequence[InfuseValidationHook] = (),
+    ) -> None:
         self._settings = settings
         self._stages = list(settings.stages)
         self._runtime_config_revision: int | None = None
+        self._programmers = {programmer.name: programmer for programmer in settings.programmers}
+        self._firmware_cache = FirmwareCache(settings)
         self._stage_factories = default_stage_factories()
+        self._stage_factories.update({
+            "nrfutil_device_recover": lambda stage: NrfutilDeviceRecoverStage(stage, self._programmers),
+            "nrfutil_reset": lambda stage: NrfutilDeviceResetStage(stage, self._programmers),
+            "firmware_flash": lambda stage: FirmwareFlashStage(stage, self._programmers, self._firmware_cache),
+            "infuse_validation": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
+            "infuse_validation_rtt": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
+        })
         if stage_factories:
             self._stage_factories.update(stage_factories)
 
