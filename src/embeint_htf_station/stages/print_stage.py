@@ -4,14 +4,14 @@ import asyncio
 from datetime import UTC, datetime
 
 from embeint_htf_station.config import StageSettings
-from embeint_htf_station.stages.base import StageLogger, StageResult
+from embeint_htf_station.stages.base import StageContext, StageLogger, StageResult
 
 
 class PrintStage:
     def __init__(self, settings: StageSettings) -> None:
         self._settings = settings
 
-    async def run(self, logger: StageLogger) -> StageResult:
+    async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
         await logger.log("info", "stage started")
 

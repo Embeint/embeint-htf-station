@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from embeint_htf_station.config import ProgrammerSettings, StageSettings
 from embeint_htf_station.firmware import FirmwareCache, FirmwareError
-from embeint_htf_station.stages.base import StageLogger, StageResult
+from embeint_htf_station.stages.base import StageContext, StageLogger, StageResult
 
 
 class NrfutilError(RuntimeError):
@@ -18,7 +18,7 @@ class NrfutilDeviceRecoverStage:
         self._settings = settings
         self._programmers = programmers
 
-    async def run(self, logger: StageLogger) -> StageResult:
+    async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
         await logger.log("info", "stage started")
 
@@ -45,7 +45,7 @@ class NrfutilDeviceResetStage:
         self._settings = settings
         self._programmers = programmers
 
-    async def run(self, logger: StageLogger) -> StageResult:
+    async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
         await logger.log("info", "stage started")
 
@@ -78,7 +78,7 @@ class FirmwareFlashStage:
         self._programmers = programmers
         self._firmware_cache = firmware_cache
 
-    async def run(self, logger: StageLogger) -> StageResult:
+    async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
         await logger.log("info", "stage started")
 

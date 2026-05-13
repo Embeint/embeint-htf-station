@@ -3,14 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from embeint_htf_station.config import StageSettings
-from embeint_htf_station.stages.base import StageLogger, StageResult
+from embeint_htf_station.stages.base import StageContext, StageLogger, StageResult
 
 
 class UnsupportedStage:
     def __init__(self, settings: StageSettings) -> None:
         self._settings = settings
 
-    async def run(self, logger: StageLogger) -> StageResult:
+    async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
         finished_at = datetime.now(UTC)
         await logger.log("error", f"unsupported stage kind: {self._settings.kind}")

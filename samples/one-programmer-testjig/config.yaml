@@ -1,0 +1,66 @@
+# MQTT connection details. Values come from the environment so this file can be
+# committed safely and reused across stations.
+mqtt:
+  host: ${HTF_MQTT_HOST:-localhost}
+  port: ${HTF_MQTT_PORT:-1883}
+  username: ${HTF_MQTT_USERNAME:-}
+  password: ${HTF_MQTT_PASSWORD:-}
+
+server:
+  api_base_url: ${HTF_API_BASE_URL:-http://localhost:5080}
+  station_key: ${HTF_API_KEY:-}
+
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+
+plugins:
+  - infuse
+
+programmers:
+  - name: jlink_1
+    kind: jlink
+    serial_number: 823000667
+    target_device: nrf54l15_m33
+    board: kudu
+    rtt_channel: 0
+    rtt_telnet_port: 19021
+
+stages:
+  - name: Device Erase Inital
+    kind: nrfutil_device_recover
+    programmer: jlink_1
+  - name: Flash Validation Firmware
+    kind: firmware_flash
+    programmer: jlink_1
+    firmware_id: 12b0cbe8-71d9-43fa-97b3-02202cf7d593
+    firmware_version: latest
+    path: zephyr/zephyr.hex
+  - name: Validation
+    kind: infuse_validation_rtt
+    programmer: jlink_1
+    reset_before_capture: true
+    number_of_tests: 10
+    test_timeout_seconds: 60
+    tests: [BT, MODEM, DISK, FLASH, LED, IMU]
+  - name: Device Erase Production
+    kind: nrfutil_device_recover
+    programmer: jlink_1
+  - name: Get Hardware ID
+    kind: hardware_id
+    programmer: jlink_1
+  - name: Device Provisioning
+    kind: infuse_provisioning
+    programmer: jlink_1
+    board_pool: kudu
+    uicr:
+      - name: infuse_id
+        bytes: 8
+        value: infuse_id
+        endian: LSB
+  - name: Flash Release Firmware
+    kind: firmware_flash
+    programmer: jlink_1
+    firmware_id: 498df6be-54bd-410a-972c-2f49b5eece88
+    firmware_version: latest
+    path: zephyr/zephyr.hex

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from embeint_htf_station.config import ProgrammerSettings, StageSettings
-from embeint_htf_station.stages.base import StageLogger, StageResult
+from embeint_htf_station.stages.base import StageContext, StageLogger, StageResult
 from embeint_htf_station.stages.nrfutil import NrfutilError
 
 
@@ -65,7 +65,7 @@ class InfuseValidationStage:
         self._hooks = hooks
         self._transport = transport
 
-    async def run(self, logger: StageLogger) -> StageResult:
+    async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
         await logger.log("info", "stage started")
 
@@ -78,6 +78,8 @@ class InfuseValidationStage:
             _validate_infuse_state(state, self._settings)
             for hook in self._hooks:
                 await hook.validate(state, logger)
+            if state.infuse_id is not None:
+                context.set_output(self._settings.name, "validation.infuse_id", state.infuse_id)
             await logger.log("info", _summary(state))
             await logger.log("info", "stage passed")
             outcome = "passed"

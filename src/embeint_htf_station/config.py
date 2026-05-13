@@ -9,6 +9,15 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class UicrWriteSettings(BaseModel):
+    name: str
+    address: str | int | None = None
+    value: str | int | None = None
+    source: str = "auto"
+    width_bits: int = 32
+    byte_order: str = "little"
+
+
 class StageSettings(BaseModel):
     name: str
     kind: str = "print"
@@ -25,6 +34,11 @@ class StageSettings(BaseModel):
     rtt_channel: int = 0
     rtt_telnet_port: int = 19021
     reset_before_capture: bool = True
+    board_pool: str | None = None
+    constants: tuple[str, ...] = ()
+    uicr: tuple[UicrWriteSettings, ...] = ()
+    hardware_id_address: str | int | None = None
+    hardware_id_words: int | None = None
 
 
 class ProgrammerSettings(BaseModel):
@@ -32,6 +46,7 @@ class ProgrammerSettings(BaseModel):
     kind: str
     serial_number: str | int | None = None
     target_device: str | None = None
+    board: str | None = None
     rtt_channel: int = 0
     rtt_telnet_port: int = 19021
 
@@ -50,6 +65,7 @@ class Settings(BaseSettings):
 
     org_id: str = Field(..., description="UUID of the org this station belongs to")
     station_id: str = Field(..., description="UUID assigned to this station by the server")
+    plugins: tuple[str, ...] = ()
     programmers: tuple[ProgrammerSettings, ...] = ()
     stages: tuple[StageSettings, ...] = Field(default_factory=lambda: (
         StageSettings(name="print testing"),
@@ -91,6 +107,7 @@ def load_settings_from_yaml(path: Path) -> Settings:
         firmware_cache_dir=str(server.get("firmware_cache_dir", ".htf-cache/firmware")),
         org_id=str(_required(station, "org_id")),
         station_id=str(_required(station, "station_id")),
+        plugins=_str_tuple(data.get("plugins")),
         programmers=parse_programmer_settings(data),
         stages=parse_stage_settings(data),
     )
@@ -142,6 +159,11 @@ def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
             reset_before_capture=bool(
                 raw_stage.get("reset_before_capture", raw_stage.get("resetBeforeCapture", True)),
             ),
+            board_pool=_optional_str(raw_stage.get("board_pool", raw_stage.get("boardPool"))),
+            constants=_str_tuple(raw_stage.get("constants")),
+            uicr=_uicr_tuple(raw_stage.get("uicr", raw_stage.get("uicr_writes", raw_stage.get("uicrWrites")))),
+            hardware_id_address=raw_stage.get("hardware_id_address", raw_stage.get("hardwareIdAddress")),
+            hardware_id_words=_optional_int(raw_stage.get("hardware_id_words", raw_stage.get("hardwareIdWords"))),
         ))
 
     if not stages:
@@ -172,6 +194,7 @@ def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings,
             kind=kind.strip(),
             serial_number=raw_programmer.get("serial_number", raw_programmer.get("serialNumber")),
             target_device=_optional_str(raw_programmer.get("target_device", raw_programmer.get("targetDevice"))),
+            board=_optional_str(raw_programmer.get("board")),
             rtt_channel=int(raw_programmer.get("rtt_channel", raw_programmer.get("rttChannel", 0))),
             rtt_telnet_port=int(raw_programmer.get("rtt_telnet_port", raw_programmer.get("rttTelnetPort", 19021))),
         ))
@@ -386,3 +409,52 @@ def _str_tuple(value: Any) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return (str(value).strip(),)
+
+
+def _uicr_tuple(value: Any) -> tuple[UicrWriteSettings, ...]:
+    if value is None or value == "":
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError("Config stage field 'uicr' must be a list")
+
+    writes: list[UicrWriteSettings] = []
+    for index, raw_write in enumerate(value, start=1):
+        if not isinstance(raw_write, dict):
+            raise ConfigError(f"Config UICR write {index} must be a mapping")
+        writes.append(UicrWriteSettings(
+            name=str(raw_write.get("name", "")).strip(),
+            address=raw_write.get("address"),
+            value=raw_write.get("value"),
+            source=str(raw_write.get("source", "auto")),
+            width_bits=_uicr_width_bits(raw_write),
+            byte_order=_uicr_byte_order(raw_write),
+        ))
+    return tuple(writes)
+
+
+def _uicr_width_bits(raw_write: dict[str, Any]) -> int:
+    byte_count = raw_write.get("bytes")
+    if byte_count is not None:
+        return int(byte_count) * 8
+    return int(raw_write.get("width_bits", raw_write.get("widthBits", 32)))
+
+
+def _uicr_byte_order(raw_write: dict[str, Any]) -> str:
+    value = raw_write.get(
+        "byte_order",
+        raw_write.get("byteOrder", raw_write.get("endian", raw_write.get("endin", "little"))),
+    )
+    normalized = str(value).strip().lower()
+    aliases = {
+        "lsb": "little",
+        "least": "little",
+        "little": "little",
+        "little_endian": "little",
+        "little-endian": "little",
+        "msb": "big",
+        "most": "big",
+        "big": "big",
+        "big_endian": "big",
+        "big-endian": "big",
+    }
+    return aliases.get(normalized, normalized)

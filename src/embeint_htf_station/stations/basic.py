@@ -16,7 +16,9 @@ from embeint_htf_station.config import ConfigError, Settings, parse_stage_settin
 from embeint_htf_station.firmware import FirmwareCache
 from embeint_htf_station.messaging.batch_logger import BatchLogger
 from embeint_htf_station.messaging.client import connect
-from embeint_htf_station.stages import StageFactory, StageResult, create_stage, default_stage_factories
+from embeint_htf_station.stages import StageContext, StageFactory, StageResult, create_stage, default_stage_factories
+from embeint_htf_station.stages.hardware_id import HardwareIdStage
+from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage
 from embeint_htf_station.stages.infuse_validation import InfuseValidationHook, InfuseValidationStage
 from embeint_htf_station.stages.nrfutil import FirmwareFlashStage, NrfutilDeviceRecoverStage, NrfutilDeviceResetStage
 
@@ -47,9 +49,18 @@ class RuntimeConfiguration:
 
 
 class StageScopedLogger:
-    def __init__(self, logger: BatchLogger, stage_name: str) -> None:
+    def __init__(
+        self,
+        logger: BatchLogger,
+        stage_name: str,
+        *,
+        dut_id: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self._logger = logger
         self._stage_name = stage_name
+        self.dut_id = dut_id
+        self.run_id = run_id
 
     async def start(self) -> None:
         formatted = f"======={self._stage_name}======="
@@ -87,8 +98,10 @@ class BasicStation:
             "nrfutil_device_recover": lambda stage: NrfutilDeviceRecoverStage(stage, self._programmers),
             "nrfutil_reset": lambda stage: NrfutilDeviceResetStage(stage, self._programmers),
             "firmware_flash": lambda stage: FirmwareFlashStage(stage, self._programmers, self._firmware_cache),
+            "hardware_id": lambda stage: HardwareIdStage(stage, self._programmers),
             "infuse_validation": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
             "infuse_validation_rtt": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
+            "infuse_provisioning": lambda stage: InfuseProvisioningStage(stage, self._programmers, self._settings),
         })
         if stage_factories:
             self._stage_factories.update(stage_factories)
@@ -174,14 +187,23 @@ class BasicStation:
             for index, stage in enumerate(self._stages):
                 await self._publish_stage_update(client, run_id, index, stage.name, "pending")
 
+            run_context = StageContext(dut_id=dut_id, run_id=run_id)
             stages: list[StageResult] = []
             for index, stage_settings in enumerate(self._stages):
                 await self._publish_stage_update(client, run_id, index, stage_settings.name, "running")
-                stage_logger = StageScopedLogger(logger, stage_settings.name)
+                stage_logger = StageScopedLogger(
+                    logger,
+                    stage_settings.name,
+                    dut_id=dut_id,
+                    run_id=run_id,
+                )
                 await stage_logger.start()
                 stage_started_at = datetime.now(UTC)
                 try:
-                    stage_result = await create_stage(stage_settings, self._stage_factories).run(stage_logger)
+                    stage_result = await create_stage(stage_settings, self._stage_factories).run(
+                        stage_logger,
+                        run_context,
+                    )
                 except asyncio.CancelledError:
                     finished_at = datetime.now(UTC)
                     await stage_logger.log("warning", "stage aborted")

@@ -26,11 +26,13 @@ server:
 station:
   org_id: ${HTF_ORG_ID}
   station_id: ${HTF_STATION_ID}
+plugins: [infuse]
 programmers:
   - name: jlink_1
     kind: jlink
     serial_number: 823000667
     target_device: nrf54l15_xxca
+    board: kudu
     rtt_channel: 0
     rtt_telnet_port: 19021
 stages:
@@ -65,11 +67,13 @@ stages:
     assert settings.firmware_cache_dir == ".cache/firmware"
     assert settings.org_id == "org-1"
     assert settings.station_id == "station-1"
+    assert settings.plugins == ("infuse",)
     assert len(settings.programmers) == 1
     assert settings.programmers[0].name == "jlink_1"
     assert settings.programmers[0].kind == "jlink"
     assert settings.programmers[0].serial_number == 823000667
     assert settings.programmers[0].target_device == "nrf54l15_xxca"
+    assert settings.programmers[0].board == "kudu"
     assert settings.programmers[0].rtt_channel == 0
     assert settings.programmers[0].rtt_telnet_port == 19021
     assert len(settings.stages) == 3
@@ -89,6 +93,33 @@ stages:
     assert settings.stages[2].number_of_tests == 10
     assert settings.stages[2].test_timeout_seconds == 60
     assert settings.stages[2].tests == ("BT", "MODEM", "DISK")
+
+
+def test_parse_stage_settings_supports_infuse_provisioning_uicr_entries() -> None:
+    stages = parse_stage_settings({
+        "stages": [{
+            "name": "Device Provisioning",
+            "kind": "infuse_provisioning",
+            "programmer": "jlink_1",
+            "board_pool": "kudu",
+            "uicr": [{
+                "name": "infuse_id",
+                "bytes": 8,
+                "value": "infuse_id",
+                "endin": "LSB",
+            }],
+        }],
+    })
+
+    assert stages[0].board_pool == "kudu"
+    assert stages[0].constants == ()
+    assert len(stages[0].uicr) == 1
+    assert stages[0].uicr[0].name == "infuse_id"
+    assert stages[0].uicr[0].address is None
+    assert stages[0].uicr[0].source == "auto"
+    assert stages[0].uicr[0].value == "infuse_id"
+    assert stages[0].uicr[0].width_bits == 64
+    assert stages[0].uicr[0].byte_order == "little"
 
 
 def test_load_settings_from_yaml_reads_sibling_dotenv(tmp_path: Path) -> None:
