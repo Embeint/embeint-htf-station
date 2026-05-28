@@ -23,6 +23,12 @@ def main() -> None:
         default=Path(__file__).with_name("config.yaml"),
         help="Path to the station YAML config.",
     )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path(__file__).with_name(".env"),
+        help="Path to the environment file.",
+    )
     args = parser.parse_args()
 
     settings = load_settings_from_yaml(args.config)

@@ -33,7 +33,7 @@ stages:
   - name: Flash Validation Firmware
     kind: firmware_flash
     programmer: jlink_1
-    firmware_id: 12b0cbe8-71d9-43fa-97b3-02202cf7d593
+    firmware_id: 9a720fc7-1ce5-414d-ab99-b7b4fecea319
     firmware_version: latest
     path: zephyr/zephyr.hex
   - name: Validation
@@ -61,6 +61,6 @@ stages:
   - name: Flash Release Firmware
     kind: firmware_flash
     programmer: jlink_1
-    firmware_id: 498df6be-54bd-410a-972c-2f49b5eece88
+    firmware_id: fb7558d3-66c9-452a-bae9-7356395d6cbd
     firmware_version: latest
     path: zephyr/zephyr.hex
