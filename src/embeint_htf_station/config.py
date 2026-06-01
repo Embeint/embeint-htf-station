@@ -93,18 +93,23 @@ def load_settings_from_yaml(path: Path) -> Settings:
 
     _load_env_file(path.with_name(".env"))
     data = _parse_simple_yaml(path)
-    mqtt = _mapping(data.get("mqtt"), "mqtt")
+    mqtt = _optional_mapping(data.get("mqtt"), "mqtt")
     station = _mapping(data.get("station"), "station")
-    server = _optional_mapping(data.get("server"))
+    server = _optional_mapping(data.get("server"), "server")
 
     return Settings(
-        broker_host=str(mqtt.get("host", "localhost")),
-        broker_port=int(mqtt.get("port", 1883)),
-        broker_username=_optional_str(mqtt.get("username")),
-        broker_password=_optional_str(mqtt.get("password")),
-        api_base_url=str(server.get("api_base_url", "http://localhost:5080")),
-        station_key=_optional_str(server.get("station_key")),
-        firmware_cache_dir=str(server.get("firmware_cache_dir", ".htf-cache/firmware")),
+        broker_host=_env_or_config("HTF_MQTT_HOST", mqtt, "host", "localhost"),
+        broker_port=int(_env_or_config("HTF_MQTT_PORT", mqtt, "port", 1883)),
+        broker_username=_optional_str(_env_or_config("HTF_MQTT_USERNAME", mqtt, "username")),
+        broker_password=_optional_str(_env_or_config("HTF_MQTT_PASSWORD", mqtt, "password")),
+        api_base_url=_env_or_config("HTF_API_BASE_URL", server, "api_base_url", "http://localhost:5080"),
+        station_key=_optional_str(_env_or_config("HTF_API_KEY", server, "station_key")),
+        firmware_cache_dir=_env_or_config(
+            "HTF_FIRMWARE_CACHE_DIR",
+            server,
+            "firmware_cache_dir",
+            ".htf-cache/firmware",
+        ),
         org_id=str(_required(station, "org_id")),
         station_id=str(_required(station, "station_id")),
         plugins=_str_tuple(data.get("plugins")),
@@ -376,12 +381,20 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
     return value
 
 
-def _optional_mapping(value: Any) -> dict[str, Any]:
+def _optional_mapping(value: Any, name: str = "Optional config section") -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ConfigError("Optional config section must be a mapping")
+        raise ConfigError(f"Config section '{name}' must be a mapping")
     return value
+
+
+def _env_or_config(env_name: str, values: dict[str, Any], key: str, default: Any = None) -> str:
+    value = os.getenv(env_name)
+    if value is not None:
+        return value
+    configured = values.get(key, default)
+    return "" if configured is None else str(configured)
 
 
 def _required(values: dict[str, Any], key: str) -> Any:

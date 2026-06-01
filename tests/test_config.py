@@ -95,6 +95,84 @@ stages:
     assert settings.stages[2].tests == ("BT", "MODEM", "DISK")
 
 
+def test_load_settings_from_yaml_does_not_require_mqtt_or_server_sections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTF_MQTT_HOST", "broker.staging.local")
+    monkeypatch.setenv("HTF_MQTT_PORT", "1885")
+    monkeypatch.setenv("HTF_API_BASE_URL", "https://staging.example.com")
+    monkeypatch.setenv("HTF_API_KEY", "station-key")
+    monkeypatch.setenv("HTF_ORG_ID", "org-1")
+    monkeypatch.setenv("HTF_STATION_ID", "station-1")
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+stages:
+  - name: Smoke
+    kind: print
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings_from_yaml(config)
+
+    assert settings.broker_host == "broker.staging.local"
+    assert settings.broker_port == 1885
+    assert settings.api_base_url == "https://staging.example.com"
+    assert settings.station_key == "station-key"
+    assert settings.org_id == "org-1"
+    assert settings.station_id == "station-1"
+
+
+def test_load_settings_from_yaml_environment_overrides_mqtt_and_server_yaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTF_MQTT_HOST", "env-broker.local")
+    monkeypatch.setenv("HTF_MQTT_PORT", "1886")
+    monkeypatch.setenv("HTF_MQTT_USERNAME", "env-user")
+    monkeypatch.setenv("HTF_MQTT_PASSWORD", "env-pass")
+    monkeypatch.setenv("HTF_API_BASE_URL", "https://env.example.com")
+    monkeypatch.setenv("HTF_API_KEY", "env-station-key")
+    monkeypatch.setenv("HTF_FIRMWARE_CACHE_DIR", ".env-cache/firmware")
+    monkeypatch.setenv("HTF_ORG_ID", "org-1")
+    monkeypatch.setenv("HTF_STATION_ID", "station-1")
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+mqtt:
+  host: yaml-broker.local
+  port: 1999
+  username: yaml-user
+  password: yaml-pass
+server:
+  api_base_url: https://yaml.example.com
+  station_key: yaml-station-key
+  firmware_cache_dir: .yaml-cache/firmware
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings_from_yaml(config)
+
+    assert settings.broker_host == "env-broker.local"
+    assert settings.broker_port == 1886
+    assert settings.broker_username == "env-user"
+    assert settings.broker_password == "env-pass"
+    assert settings.api_base_url == "https://env.example.com"
+    assert settings.station_key == "env-station-key"
+    assert settings.firmware_cache_dir == ".env-cache/firmware"
+
+
 def test_parse_stage_settings_supports_infuse_provisioning_uicr_entries() -> None:
     stages = parse_stage_settings({
         "stages": [{
