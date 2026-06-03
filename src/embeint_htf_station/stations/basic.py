@@ -13,6 +13,13 @@ from urllib.request import Request, urlopen
 import structlog
 
 from embeint_htf_station.config import ConfigError, Settings, parse_stage_settings_from_yaml_text
+from embeint_htf_station.contracts.mqtt import (
+    Command,
+    Heartbeat,
+    Stage,
+    TestResult as MqttTestResult,
+    TestResultStagesItem,
+)
 from embeint_htf_station.firmware import FirmwareCache
 from embeint_htf_station.messaging.batch_logger import BatchLogger
 from embeint_htf_station.messaging.client import connect
@@ -135,12 +142,12 @@ class BasicStation:
                     if command is None:
                         continue
 
-                    payload = command.get("payload")
+                    payload = command.payload
                     if not isinstance(payload, dict):
                         log.warning("basic_station.command_missing_payload")
                         continue
 
-                    if command.get("kind") == "abort-run":
+                    if command.kind == "abort-run":
                         run_id = payload.get("runId")
                         if isinstance(run_id, str) and current_run_task and not current_run_task.done() and run_id == current_run_id:
                             log.info("basic_station.abort_requested", run_id=run_id)
@@ -149,8 +156,8 @@ class BasicStation:
                             log.warning("basic_station.abort_ignored", run_id=run_id, active_run_id=current_run_id)
                         continue
 
-                    if command.get("kind") != "run-plan":
-                        log.info("basic_station.command_ignored", kind=command.get("kind"))
+                    if command.kind != "run-plan":
+                        log.info("basic_station.command_ignored", kind=command.kind)
                         continue
 
                     if current_run_task and not current_run_task.done():
@@ -261,18 +268,22 @@ class BasicStation:
             log.error("basic_station.run_task_failed", error=str(exc))
 
     @staticmethod
-    def _parse_command(payload: bytes | bytearray | memoryview) -> dict[str, object] | None:
+    def _parse_command(payload: bytes | bytearray | memoryview) -> Command | None:
         try:
             decoded = bytes(payload).decode("utf-8")
-            command = json.loads(decoded)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            command = Command.model_validate_json(decoded)
+        except (UnicodeDecodeError, ValueError):
             log.warning("basic_station.command_invalid_json")
             return None
 
-        return command if isinstance(command, dict) else None
+        return command
 
     async def _publish_heartbeat(self, client: _Publisher, status: str, run_id: str | None = None) -> None:
-        payload = json.dumps({"ts": datetime.now(UTC).isoformat(), "status": status, "currentRunId": run_id})
+        payload = Heartbeat(
+            ts=datetime.now(UTC),
+            status=status,
+            currentRunId=run_id,
+        ).model_dump_json(by_alias=True)
         await client.publish(f"{self._settings.topic_prefix}/heartbeat", payload=payload, qos=1)
 
     async def _serve_heartbeat_loop(
@@ -294,38 +305,34 @@ class BasicStation:
         name: str,
         status: str,
     ) -> None:
-        payload = json.dumps(
-            {
-                "ts": datetime.now(UTC).isoformat(),
-                "runId": run_id,
-                "index": index,
-                "name": name,
-                "status": status,
-            },
-        )
+        payload = Stage(
+            ts=datetime.now(UTC),
+            runId=run_id,
+            index=index,
+            name=name,
+            status=status,
+        ).model_dump_json(by_alias=True)
         await client.publish(f"{self._settings.topic_prefix}/stage", payload=payload, qos=1)
 
     async def _publish_result(self, client: _Publisher, result: TestResult) -> None:
-        payload = json.dumps(
-            {
-                "ts": result.finished_at.isoformat(),
-                "runId": result.run_id,
-                "dutId": result.dut_id,
-                "outcome": result.outcome,
-                "configRevision": result.config_revision,
-                "startedAt": result.started_at.isoformat(),
-                "finishedAt": result.finished_at.isoformat(),
-                "stages": [
-                    {
-                        "name": stage.name,
-                        "outcome": stage.outcome,
-                        "startedAt": stage.started_at.isoformat(),
-                        "finishedAt": stage.finished_at.isoformat(),
-                    }
-                    for stage in result.stages
-                ],
-            },
-        )
+        payload = MqttTestResult(
+            ts=result.finished_at,
+            runId=result.run_id,
+            dutId=result.dut_id,
+            outcome=result.outcome,
+            configRevision=result.config_revision,
+            startedAt=result.started_at,
+            finishedAt=result.finished_at,
+            stages=[
+                TestResultStagesItem(
+                    name=stage.name,
+                    outcome=stage.outcome,
+                    startedAt=stage.started_at,
+                    finishedAt=stage.finished_at,
+                )
+                for stage in result.stages
+            ],
+        ).model_dump_json(by_alias=True)
         await client.publish(f"{self._settings.topic_prefix}/result", payload=payload, qos=1)
 
     async def _load_runtime_configuration(self) -> RuntimeConfiguration | None:

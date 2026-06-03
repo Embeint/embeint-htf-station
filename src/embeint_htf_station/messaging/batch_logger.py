@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import aiomqtt
 import structlog
 
+from embeint_htf_station.contracts.mqtt import LogBatch, LogBatchEntriesItem
+
 log = structlog.get_logger(__name__)
 
 
 @dataclass
 class _Batch:
-    entries: list[dict] = field(default_factory=list)
+    entries: list[LogBatchEntriesItem] = field(default_factory=list)
     byte_size: int = 0
 
 
@@ -44,8 +45,8 @@ class BatchLogger:
         await self._flush()
 
     async def log(self, level: str, msg: str) -> None:
-        entry = {"t": datetime.now(UTC).isoformat(), "lvl": level, "msg": msg}
-        encoded = json.dumps(entry)
+        entry = LogBatchEntriesItem(t=datetime.now(UTC), lvl=level, msg=msg)
+        encoded = entry.model_dump_json(by_alias=True)
         async with self._lock:
             self._batch.entries.append(entry)
             self._batch.byte_size += len(encoded)
@@ -67,6 +68,10 @@ class BatchLogger:
     async def _flush_locked(self) -> None:
         if not self._batch.entries:
             return
-        payload = json.dumps({"ts": datetime.now(UTC).isoformat(), "runId": self._run_id, "entries": self._batch.entries})
+        payload = LogBatch(
+            ts=datetime.now(UTC),
+            runId=self._run_id,
+            entries=self._batch.entries,
+        ).model_dump_json(by_alias=True)
         await self._client.publish(self._topic, payload=payload, qos=1)
         self._batch = _Batch()

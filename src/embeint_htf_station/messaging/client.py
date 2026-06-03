@@ -8,6 +8,7 @@ import aiomqtt
 import structlog
 
 from embeint_htf_station.config import Settings
+from embeint_htf_station.contracts.mqtt import Heartbeat
 
 log = structlog.get_logger(__name__)
 
@@ -28,11 +29,11 @@ async def connect(settings: Settings) -> AsyncIterator[aiomqtt.Client]:
 async def heartbeat_loop(client: aiomqtt.Client, settings: Settings, interval_s: float = 5.0) -> None:
     topic = f"{settings.topic_prefix}/heartbeat"
     while True:
-        payload = '{"ts":"%s","status":"idle"}' % _utc_now_iso()
+        payload = Heartbeat(ts=_utc_now(), status="idle").model_dump_json(by_alias=True)
         await client.publish(topic, payload=payload, qos=1)
         await asyncio.sleep(interval_s)
 
 
-def _utc_now_iso() -> str:
+def _utc_now():
     from datetime import UTC, datetime
-    return datetime.now(UTC).isoformat()
+    return datetime.now(UTC)

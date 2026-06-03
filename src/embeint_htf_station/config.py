@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -86,9 +87,8 @@ _ENV_PATTERN = re.compile(r"\$\{(?P<name>[A-Z0-9_]+)(?::-?(?P<default>[^}]*))?\}
 def load_settings_from_yaml(path: Path) -> Settings:
     """Load station settings from a small YAML file with ${ENV_VAR} expansion.
 
-    The sample station config is intentionally simple: nested mappings only, with
-    values supplied from environment variables. This parser keeps the runtime
-    dependency-free until station configs need full YAML features.
+    Environment variables are expanded before parsing so YAML files can use
+    `${NAME}` and `${NAME:-default}` placeholders.
     """
 
     _load_env_file(path.with_name(".env"))
@@ -122,11 +122,11 @@ def _parse_simple_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ConfigError(f"Config file does not exist: {path}")
 
-    return _parse_simple_yaml_text(path.read_text(encoding="utf-8"), path)
+    return _parse_yaml_text(path.read_text(encoding="utf-8"), path)
 
 
 def parse_stage_settings_from_yaml_text(text: str) -> tuple[StageSettings, ...]:
-    return parse_stage_settings(_parse_simple_yaml_text(text, Path("<runtime-yaml>")))
+    return parse_stage_settings(_parse_yaml_text(text, Path("<runtime-yaml>")))
 
 
 def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
@@ -207,108 +207,33 @@ def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings,
     return tuple(programmers)
 
 
-def _parse_simple_yaml_text(text: str, path: Path) -> dict[str, Any]:
-    lines: list[tuple[int, int, str]] = []
-    for line_no, raw_line in enumerate(text.splitlines(), start=1):
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            continue
+def _parse_yaml_text(text: str, path: Path) -> dict[str, Any]:
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path}: could not parse YAML: {exc}") from exc
 
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        if indent % 2 != 0:
-            raise ConfigError(f"{path}:{line_no}: indentation must use two-space levels")
-        lines.append((line_no, indent, raw_line.strip()))
-
-    if not lines:
+    if parsed is None:
         return {}
-
-    def parse_block(index: int, indent: int) -> tuple[Any, int]:
-        if index >= len(lines):
-            return {}, index
-
-        line_no, actual_indent, stripped = lines[index]
-        if actual_indent != indent:
-            raise ConfigError(f"{path}:{line_no}: unexpected indentation")
-        if stripped.startswith("- "):
-            return parse_list(index, indent)
-        return parse_mapping(index, indent)
-
-    def parse_mapping(index: int, indent: int) -> tuple[dict[str, Any], int]:
-        values: dict[str, Any] = {}
-
-        while index < len(lines):
-            line_no, actual_indent, stripped = lines[index]
-            if actual_indent < indent:
-                break
-            if actual_indent > indent:
-                raise ConfigError(f"{path}:{line_no}: unexpected indentation")
-            if stripped.startswith("- "):
-                break
-
-            key, raw_value = _parse_key_value(stripped, path, line_no)
-            index += 1
-            if raw_value == "":
-                if index < len(lines) and lines[index][1] > indent:
-                    values[key], index = parse_block(index, lines[index][1])
-                else:
-                    values[key] = {}
-            else:
-                values[key] = _coerce_scalar(_expand_env(raw_value, path, line_no))
-
-        return values, index
-
-    def parse_list(index: int, indent: int) -> tuple[list[Any], int]:
-        values: list[Any] = []
-
-        while index < len(lines):
-            line_no, actual_indent, stripped = lines[index]
-            if actual_indent < indent:
-                break
-            if actual_indent != indent or not stripped.startswith("- "):
-                break
-
-            item_text = stripped[2:].strip()
-            index += 1
-            if item_text == "":
-                if index < len(lines) and lines[index][1] > indent:
-                    item, index = parse_block(index, lines[index][1])
-                else:
-                    item = {}
-            elif ":" in item_text:
-                key, raw_value = _parse_key_value(item_text, path, line_no)
-                item = {
-                    key: _coerce_scalar(_expand_env(raw_value, path, line_no)) if raw_value else {},
-                }
-                if index < len(lines) and lines[index][1] > indent:
-                    extra, index = parse_mapping(index, lines[index][1])
-                    item.update(extra)
-            else:
-                item = _coerce_scalar(_expand_env(item_text, path, line_no))
-                if index < len(lines) and lines[index][1] > indent:
-                    nested_line_no = lines[index][0]
-                    raise ConfigError(f"{path}:{nested_line_no}: scalar list item cannot have nested values")
-
-            values.append(item)
-
-        return values, index
-
-    parsed, index = parse_block(0, lines[0][1])
-    if index != len(lines):
-        line_no = lines[index][0]
-        raise ConfigError(f"{path}:{line_no}: could not parse YAML")
     if not isinstance(parsed, dict):
         raise ConfigError(f"{path}: top-level YAML must be a mapping")
-    return parsed
+    return _expand_env_values(parsed, path)
 
 
-def _parse_key_value(text: str, path: Path, line_no: int) -> tuple[str, str]:
-    if ":" not in text:
-        raise ConfigError(f"{path}:{line_no}: expected 'key: value'")
-    key, raw_value = text.split(":", 1)
-    key = key.strip()
-    raw_value = raw_value.strip()
-    if not key:
-        raise ConfigError(f"{path}:{line_no}: empty key")
-    return key, raw_value
+def _expand_env_values(value: Any, path: Path) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _expand_env_values(item, path)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _expand_env_values(item, path)
+            for item in value
+        ]
+    if isinstance(value, str):
+        return _expand_env(value, path)
+    return value
 
 
 def _load_env_file(path: Path) -> None:
@@ -330,7 +255,7 @@ def _load_env_file(path: Path) -> None:
         os.environ.setdefault(key, _strip_quotes(value.strip()))
 
 
-def _expand_env(value: str, path: Path, line_no: int) -> str:
+def _expand_env(value: str, path: Path) -> str:
     def replace(match: re.Match[str]) -> str:
         name = match.group("name")
         default = match.group("default")
@@ -339,34 +264,9 @@ def _expand_env(value: str, path: Path, line_no: int) -> str:
             return env_value
         if default is not None:
             return default
-        raise ConfigError(f"{path}:{line_no}: missing required environment variable {name}")
+        raise ConfigError(f"{path}: missing required environment variable {name}")
 
     return _ENV_PATTERN.sub(replace, value)
-
-
-def _coerce_scalar(value: str) -> str | int | float | bool | None:
-    value = _strip_quotes(value)
-    if value.startswith("[") and value.endswith("]"):
-        return [
-            _coerce_scalar(item.strip())
-            for item in value[1:-1].split(",")
-            if item.strip()
-        ]
-    lowered = value.lower()
-    if lowered in {"null", "~"}:
-        return None
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        return value
 
 
 def _strip_quotes(value: str) -> str:
