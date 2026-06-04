@@ -208,8 +208,9 @@ def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings,
 
 
 def _parse_yaml_text(text: str, path: Path) -> dict[str, Any]:
+    expanded_text = _expand_env(text, path)
     try:
-        parsed = yaml.safe_load(text)
+        parsed = yaml.safe_load(expanded_text)
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: could not parse YAML: {exc}") from exc
 
@@ -217,23 +218,7 @@ def _parse_yaml_text(text: str, path: Path) -> dict[str, Any]:
         return {}
     if not isinstance(parsed, dict):
         raise ConfigError(f"{path}: top-level YAML must be a mapping")
-    return _expand_env_values(parsed, path)
-
-
-def _expand_env_values(value: Any, path: Path) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _expand_env_values(item, path)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [
-            _expand_env_values(item, path)
-            for item in value
-        ]
-    if isinstance(value, str):
-        return _expand_env(value, path)
-    return value
+    return parsed
 
 
 def _load_env_file(path: Path) -> None:

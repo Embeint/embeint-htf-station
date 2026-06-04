@@ -129,6 +129,37 @@ stages:
     assert settings.station_id == "station-1"
 
 
+def test_load_settings_from_yaml_expands_environment_before_yaml_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTF_ORG_ID", "org-1")
+    monkeypatch.setenv("HTF_STATION_ID", "station-1")
+    monkeypatch.setenv("HTF_MQTT_PORT", "1887")
+    monkeypatch.setenv("HTF_PLUGIN_LIST", "[infuse, validation]")
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+mqtt:
+  port: ${HTF_MQTT_PORT}
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+plugins: ${HTF_PLUGIN_LIST}
+stages:
+  - name: Smoke
+    kind: print
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings_from_yaml(config)
+
+    assert settings.broker_port == 1887
+    assert settings.plugins == ("infuse", "validation")
+
+
 def test_load_settings_from_yaml_environment_overrides_mqtt_and_server_yaml(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
