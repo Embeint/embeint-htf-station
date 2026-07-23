@@ -19,6 +19,12 @@ class UicrWriteSettings(BaseModel):
     byte_order: str = "little"
 
 
+class StageDependencySettings(BaseModel):
+    lane: str
+    stage: str
+    outcome: str = "passed"
+
+
 class StageSettings(BaseModel):
     name: str
     kind: str = "print"
@@ -40,6 +46,8 @@ class StageSettings(BaseModel):
     uicr: tuple[UicrWriteSettings, ...] = ()
     hardware_id_address: str | int | None = None
     hardware_id_words: int | None = None
+    locks: tuple[str, ...] = ()
+    after: tuple[StageDependencySettings, ...] = ()
 
 
 class ProgrammerSettings(BaseModel):
@@ -50,6 +58,17 @@ class ProgrammerSettings(BaseModel):
     board: str | None = None
     rtt_channel: int = 0
     rtt_telnet_port: int = 19021
+
+
+class LaneSettings(BaseModel):
+    name: str
+    programmer: str
+    dut_id_source: str = "manual"
+
+
+class LanePlanSettings(BaseModel):
+    lane: str
+    stages: tuple[StageSettings, ...]
 
 
 class Settings(BaseSettings):
@@ -71,6 +90,8 @@ class Settings(BaseSettings):
     stages: tuple[StageSettings, ...] = Field(default_factory=lambda: (
         StageSettings(name="print testing"),
     ))
+    lanes: tuple[LaneSettings, ...] = ()
+    plans: tuple[LanePlanSettings, ...] = ()
 
     @property
     def topic_prefix(self) -> str:
@@ -97,6 +118,11 @@ def load_settings_from_yaml(path: Path) -> Settings:
     station = _mapping(data.get("station"), "station")
     server = _optional_mapping(data.get("server"), "server")
 
+    programmers = parse_programmer_settings(data)
+    stages = parse_stage_settings(data)
+    lanes = parse_lane_settings(data, programmers)
+    plans = parse_lane_plan_settings(data, lanes, stages)
+
     return Settings(
         broker_host=_env_or_config("HTF_MQTT_HOST", mqtt, "host", "localhost"),
         broker_port=int(_env_or_config("HTF_MQTT_PORT", mqtt, "port", 1883)),
@@ -113,8 +139,10 @@ def load_settings_from_yaml(path: Path) -> Settings:
         org_id=str(_required(station, "org_id")),
         station_id=str(_required(station, "station_id")),
         plugins=_str_tuple(data.get("plugins")),
-        programmers=parse_programmer_settings(data),
-        stages=parse_stage_settings(data),
+        programmers=programmers,
+        stages=stages,
+        lanes=lanes,
+        plans=plans,
     )
 
 
@@ -127,6 +155,21 @@ def _parse_simple_yaml(path: Path) -> dict[str, Any]:
 
 def parse_stage_settings_from_yaml_text(text: str) -> tuple[StageSettings, ...]:
     return parse_stage_settings(_parse_yaml_text(text, Path("<runtime-yaml>")))
+
+
+def parse_runtime_plans_from_yaml_text(
+    text: str,
+    programmers: tuple[ProgrammerSettings, ...],
+) -> tuple[tuple[LaneSettings, ...], tuple[LanePlanSettings, ...]]:
+    """Parse server-owned plans while checking their programmer names locally.
+
+    Runtime YAML deliberately contains no programmer hardware details; those remain
+    in the station's local config.  A legacy flat ``stages`` document is one
+    ``default`` lane.
+    """
+    data = _parse_yaml_text(text, Path("<runtime-yaml>"))
+    lanes = parse_lane_settings(data, programmers)
+    return lanes, parse_lane_plan_settings(data, lanes, parse_stage_settings(data))
 
 
 def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
@@ -144,37 +187,125 @@ def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
         if not isinstance(name, str) or not name.strip():
             raise ConfigError(f"Config stage {index} requires a non-empty name")
 
-        stages.append(StageSettings(
-            name=name.strip(),
-            kind=str(raw_stage.get("kind", "print")),
-            message=str(raw_stage.get("message", "testing")),
-            wait_seconds=float(raw_stage.get("wait_seconds", raw_stage.get("waitSeconds", 5))),
-            programmer=_optional_str(raw_stage.get("programmer")),
-            firmware_id=_optional_str(raw_stage.get("firmware_id", raw_stage.get("firmwareId"))),
-            firmware_version=str(raw_stage.get("firmware_version", raw_stage.get("firmwareVersion", "latest"))),
-            path=_optional_str(raw_stage.get("path")),
-            number_of_tests=_optional_int(raw_stage.get("number_of_tests", raw_stage.get("numberOfTests"))),
-            test_timeout_seconds=float(
-                raw_stage.get("test_timeout_seconds", raw_stage.get("testTimeoutSeconds", 60)),
-            ),
-            tests=_str_tuple(raw_stage.get("tests")),
-            rtt_command=_str_tuple(raw_stage.get("rtt_command", raw_stage.get("rttCommand"))),
-            rtt_channel=int(raw_stage.get("rtt_channel", raw_stage.get("rttChannel", 0))),
-            rtt_telnet_port=int(raw_stage.get("rtt_telnet_port", raw_stage.get("rttTelnetPort", 19021))),
-            reset_before_capture=bool(
-                raw_stage.get("reset_before_capture", raw_stage.get("resetBeforeCapture", True)),
-            ),
-            board_pool=_optional_str(raw_stage.get("board_pool", raw_stage.get("boardPool"))),
-            constants=_str_tuple(raw_stage.get("constants")),
-            uicr=_uicr_tuple(raw_stage.get("uicr", raw_stage.get("uicr_writes", raw_stage.get("uicrWrites")))),
-            hardware_id_address=raw_stage.get("hardware_id_address", raw_stage.get("hardwareIdAddress")),
-            hardware_id_words=_optional_int(raw_stage.get("hardware_id_words", raw_stage.get("hardwareIdWords"))),
-        ))
+        stages.append(_parse_stage_settings_item(raw_stage, f"Config stage {index}", default_programmer=None))
 
     if not stages:
         raise ConfigError("Config section 'stages' must contain at least one stage")
 
     return tuple(stages)
+
+
+def parse_lane_settings(
+    data: dict[str, Any],
+    programmers: tuple[ProgrammerSettings, ...] | None = None,
+) -> tuple[LaneSettings, ...]:
+    raw_lanes = data.get("lanes")
+    if raw_lanes is None:
+        return ()
+    if not isinstance(raw_lanes, list):
+        raise ConfigError("Config section 'lanes' must be a list")
+
+    programmer_names = {programmer.name for programmer in programmers or ()}
+    lanes: list[LaneSettings] = []
+    lane_names: set[str] = set()
+    assigned_programmers: set[str] = set()
+    for index, raw_lane in enumerate(raw_lanes, start=1):
+        if not isinstance(raw_lane, dict):
+            raise ConfigError(f"Config lane {index} must be a mapping")
+        name = raw_lane.get("name")
+        programmer = raw_lane.get("programmer")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(f"Config lane {index} requires a non-empty name")
+        if not isinstance(programmer, str) or not programmer.strip():
+            raise ConfigError(f"Config lane {index} requires a non-empty programmer")
+
+        lane_name = name.strip()
+        programmer_name = programmer.strip()
+        if lane_name in lane_names:
+            raise ConfigError(f"Config lane {index} duplicates lane name: {lane_name}")
+        if programmer_names and programmer_name not in programmer_names:
+            raise ConfigError(f"Config lane {index} references unknown programmer: {programmer_name}")
+        if programmer_name in assigned_programmers:
+            raise ConfigError(f"Config lane {index} duplicates programmer assignment: {programmer_name}")
+
+        lane_names.add(lane_name)
+        assigned_programmers.add(programmer_name)
+        lanes.append(LaneSettings(
+            name=lane_name,
+            programmer=programmer_name,
+            dut_id_source=str(raw_lane.get("dut_id_source", raw_lane.get("dutIdSource", "manual"))),
+        ))
+
+    return tuple(lanes)
+
+
+def parse_lane_plan_settings(
+    data: dict[str, Any],
+    lanes: tuple[LaneSettings, ...] = (),
+    fallback_stages: tuple[StageSettings, ...] | None = None,
+) -> tuple[LanePlanSettings, ...]:
+    raw_plans = data.get("plans")
+    if raw_plans is None:
+        if lanes:
+            raise ConfigError("Config section 'plans' is required when 'lanes' is configured")
+        stages = fallback_stages if fallback_stages is not None else parse_stage_settings(data)
+        return (LanePlanSettings(lane="default", stages=stages),)
+    if not isinstance(raw_plans, list):
+        raise ConfigError("Config section 'plans' must be a list")
+    if not raw_plans:
+        raise ConfigError("Config section 'plans' must contain at least one plan")
+
+    lanes_by_name = {lane.name: lane for lane in lanes}
+    if not lanes_by_name:
+        raise ConfigError("Config section 'lanes' is required when 'plans' is configured")
+
+    plans: list[LanePlanSettings] = []
+    planned_lanes: set[str] = set()
+    stage_names_by_lane: dict[str, set[str]] = {}
+    for index, raw_plan in enumerate(raw_plans, start=1):
+        if not isinstance(raw_plan, dict):
+            raise ConfigError(f"Config plan {index} must be a mapping")
+        lane = raw_plan.get("lane")
+        if not isinstance(lane, str) or not lane.strip():
+            raise ConfigError(f"Config plan {index} requires a non-empty lane")
+
+        lane_name = lane.strip()
+        lane_settings = lanes_by_name.get(lane_name)
+        if lane_settings is None:
+            raise ConfigError(f"Config plan {index} references unknown lane: {lane_name}")
+        if lane_name in planned_lanes:
+            raise ConfigError(f"Config plan {index} duplicates lane plan: {lane_name}")
+
+        raw_stages = raw_plan.get("stages")
+        if not isinstance(raw_stages, list):
+            raise ConfigError(f"Config plan {index} section 'stages' must be a list")
+        if not raw_stages:
+            raise ConfigError(f"Config plan {index} section 'stages' must contain at least one stage")
+
+        stages: list[StageSettings] = []
+        stage_names: set[str] = set()
+        for stage_index, raw_stage in enumerate(raw_stages, start=1):
+            if not isinstance(raw_stage, dict):
+                raise ConfigError(f"Config plan {index} stage {stage_index} must be a mapping")
+            stage = _parse_stage_settings_item(
+                raw_stage,
+                f"Config plan {index} stage {stage_index}",
+                default_programmer=lane_settings.programmer,
+            )
+            if stage.name in stage_names:
+                raise ConfigError(f"Config plan {index} stage {stage_index} duplicates stage name: {stage.name}")
+            stage_names.add(stage.name)
+            stages.append(stage)
+
+        planned_lanes.add(lane_name)
+        stage_names_by_lane[lane_name] = stage_names
+        plans.append(LanePlanSettings(lane=lane_name, stages=tuple(stages)))
+
+    _validate_stage_dependencies(plans, stage_names_by_lane)
+    if planned_lanes != set(lanes_by_name):
+        missing = ", ".join(sorted(set(lanes_by_name) - planned_lanes))
+        raise ConfigError(f"Config section 'plans' is missing lane plans: {missing}")
+    return tuple(plans)
 
 
 def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings, ...]:
@@ -185,6 +316,7 @@ def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings,
         raise ConfigError("Config section 'programmers' must be a list")
 
     programmers: list[ProgrammerSettings] = []
+    names: set[str] = set()
     for index, raw_programmer in enumerate(raw_programmers, start=1):
         if not isinstance(raw_programmer, dict):
             raise ConfigError(f"Config programmer {index} must be a mapping")
@@ -194,6 +326,9 @@ def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings,
             raise ConfigError(f"Config programmer {index} requires a non-empty name")
         if not isinstance(kind, str) or not kind.strip():
             raise ConfigError(f"Config programmer {index} requires a non-empty kind")
+        if name.strip() in names:
+            raise ConfigError(f"Config programmer {index} duplicates programmer name: {name.strip()}")
+        names.add(name.strip())
         programmers.append(ProgrammerSettings(
             name=name.strip(),
             kind=kind.strip(),
@@ -205,6 +340,118 @@ def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings,
         ))
 
     return tuple(programmers)
+
+
+def _parse_stage_settings_item(
+    raw_stage: dict[str, Any],
+    label: str,
+    default_programmer: str | None,
+) -> StageSettings:
+    name = raw_stage.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ConfigError(f"{label} requires a non-empty name")
+
+    return StageSettings(
+        name=name.strip(),
+        kind=str(raw_stage.get("kind", "print")),
+        message=str(raw_stage.get("message", "testing")),
+        wait_seconds=float(raw_stage.get("wait_seconds", raw_stage.get("waitSeconds", 5))),
+        programmer=_optional_str(raw_stage.get("programmer")) or default_programmer,
+        firmware_id=_optional_str(raw_stage.get("firmware_id", raw_stage.get("firmwareId"))),
+        firmware_version=str(raw_stage.get("firmware_version", raw_stage.get("firmwareVersion", "latest"))),
+        path=_optional_str(raw_stage.get("path")),
+        number_of_tests=_optional_int(raw_stage.get("number_of_tests", raw_stage.get("numberOfTests"))),
+        test_timeout_seconds=float(
+            raw_stage.get("test_timeout_seconds", raw_stage.get("testTimeoutSeconds", 60)),
+        ),
+        tests=_str_tuple(raw_stage.get("tests")),
+        rtt_command=_str_tuple(raw_stage.get("rtt_command", raw_stage.get("rttCommand"))),
+        rtt_channel=int(raw_stage.get("rtt_channel", raw_stage.get("rttChannel", 0))),
+        rtt_telnet_port=int(raw_stage.get("rtt_telnet_port", raw_stage.get("rttTelnetPort", 19021))),
+        reset_before_capture=bool(
+            raw_stage.get("reset_before_capture", raw_stage.get("resetBeforeCapture", True)),
+        ),
+        board_pool=_optional_str(raw_stage.get("board_pool", raw_stage.get("boardPool"))),
+        constants=_str_tuple(raw_stage.get("constants")),
+        uicr=_uicr_tuple(raw_stage.get("uicr", raw_stage.get("uicr_writes", raw_stage.get("uicrWrites")))),
+        hardware_id_address=raw_stage.get("hardware_id_address", raw_stage.get("hardwareIdAddress")),
+        hardware_id_words=_optional_int(raw_stage.get("hardware_id_words", raw_stage.get("hardwareIdWords"))),
+        locks=_lock_tuple(raw_stage.get("locks")),
+        after=_dependency_tuple(raw_stage.get("after")),
+    )
+
+
+def _dependency_tuple(value: Any) -> tuple[StageDependencySettings, ...]:
+    if value is None or value == "":
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError("Config stage field 'after' must be a list")
+
+    dependencies: list[StageDependencySettings] = []
+    for index, raw_dependency in enumerate(value, start=1):
+        if not isinstance(raw_dependency, dict):
+            raise ConfigError(f"Config stage dependency {index} must be a mapping")
+        lane = raw_dependency.get("lane")
+        stage = raw_dependency.get("stage")
+        if not isinstance(lane, str) or not lane.strip():
+            raise ConfigError(f"Config stage dependency {index} requires a non-empty lane")
+        if not isinstance(stage, str) or not stage.strip():
+            raise ConfigError(f"Config stage dependency {index} requires a non-empty stage")
+        dependencies.append(StageDependencySettings(
+            lane=lane.strip(),
+            stage=stage.strip(),
+            outcome=str(raw_dependency.get("outcome", "passed")),
+        ))
+        if dependencies[-1].outcome not in {"passed", "failed", "aborted", "error"}:
+            raise ConfigError(f"Config stage dependency {index} has an invalid outcome")
+    return tuple(dependencies)
+
+
+def _lock_tuple(value: Any) -> tuple[str, ...]:
+    locks = _str_tuple(value)
+    if any(not lock.strip() for lock in locks):
+        raise ConfigError("Config stage locks must be non-empty strings")
+    if len(set(locks)) != len(locks):
+        raise ConfigError("Config stage locks must be unique")
+    return locks
+
+
+def _validate_stage_dependencies(
+    plans: tuple[LanePlanSettings, ...],
+    stage_names_by_lane: dict[str, set[str]],
+) -> None:
+    lane_names = stage_names_by_lane.keys()
+    graph: dict[tuple[str, str], set[tuple[str, str]]] = {
+        (plan.lane, stage.name): set() for plan in plans for stage in plan.stages
+    }
+    for plan in plans:
+        for stage in plan.stages:
+            for dependency in stage.after:
+                if dependency.lane not in lane_names:
+                    raise ConfigError(
+                        f"Config stage '{stage.name}' references unknown dependency lane: {dependency.lane}",
+                    )
+                if dependency.stage not in stage_names_by_lane[dependency.lane]:
+                    raise ConfigError(
+                        f"Config stage '{stage.name}' references unknown dependency stage: "
+                        f"{dependency.lane}.{dependency.stage}",
+                    )
+                graph[(plan.lane, stage.name)].add((dependency.lane, dependency.stage))
+
+    visiting: set[tuple[str, str]] = set()
+    visited: set[tuple[str, str]] = set()
+    def visit(node: tuple[str, str]) -> None:
+        if node in visiting:
+            raise ConfigError("Config stage dependencies must not contain a cycle")
+        if node in visited:
+            return
+        visiting.add(node)
+        for target in graph[node]:
+            visit(target)
+        visiting.remove(node)
+        visited.add(node)
+    for node in graph:
+        visit(node)
 
 
 def _parse_yaml_text(text: str, path: Path) -> dict[str, Any]:

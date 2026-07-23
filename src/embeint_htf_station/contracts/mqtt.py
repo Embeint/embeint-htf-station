@@ -18,7 +18,7 @@ class LogBatchEntriesItem(ContractModel):
 
 class TestResultStagesItem(ContractModel):
     name: str = Field(...)
-    outcome: Literal['passed', 'failed', 'aborted'] = Field(...)
+    outcome: Literal['passed', 'failed', 'aborted', 'error'] = Field(...)
     started_at: datetime = Field(alias="startedAt")
     finished_at: datetime = Field(alias="finishedAt")
 
@@ -36,7 +36,7 @@ class TestResult(ContractModel):
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
     dut_id: str = Field(alias="dutId")
-    outcome: Literal['passed', 'failed', 'aborted'] = Field(...)
+    outcome: Literal['passed', 'failed', 'aborted', 'error'] = Field(...)
     config_revision: int | None = Field(default=None, alias="configRevision")
     started_at: datetime = Field(alias="startedAt")
     finished_at: datetime = Field(alias="finishedAt")
@@ -51,5 +51,5 @@ class Stage(ContractModel):
 
 class Command(ContractModel):
     id: UUID = Field(...)
-    kind: Literal['run-plan', 'abort-run', 'reboot'] = Field(...)
+    kind: Literal['run-plan', 'run-batch', 'abort-run', 'reboot'] = Field(...)
     payload: dict[str, Any] | None = Field(default=None, alias="payload")

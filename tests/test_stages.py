@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from embeint_htf_station.config import Settings, StageSettings
+from embeint_htf_station.config import LanePlanSettings, LaneSettings, Settings, StageSettings
 from embeint_htf_station.stages import StageContext, create_stage
 from embeint_htf_station.stages.hardware_id import HardwareIdStage
 from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage
@@ -78,3 +78,40 @@ def test_basic_station_registers_hardware_id_stage() -> None:
     settings = StageSettings(name="Get Hardware ID", kind="hardware_id")
 
     assert isinstance(create_stage(settings, station._stage_factories), HardwareIdStage)
+
+
+def test_basic_station_uses_default_plan_for_single_lane_command() -> None:
+    station = BasicStation(Settings(
+        org_id="org-1",
+        station_id="station-1",
+        lanes=(LaneSettings(name="left", programmer="jlink_1"),),
+        plans=(LanePlanSettings(
+            lane="left",
+            stages=(StageSettings(name="Left Smoke", kind="print", programmer="jlink_1"),),
+        ),),
+    ))
+
+    plan = station._run_plan_from_payload({})
+
+    assert plan is not None
+    assert plan.lane == "left"
+    assert plan.stages[0].name == "Left Smoke"
+
+
+def test_basic_station_requires_lane_for_multi_lane_command() -> None:
+    station = BasicStation(Settings(
+        org_id="org-1",
+        station_id="station-1",
+        lanes=(
+            LaneSettings(name="left", programmer="jlink_1"),
+            LaneSettings(name="right", programmer="jlink_2"),
+        ),
+        plans=(
+            LanePlanSettings(lane="left", stages=(StageSettings(name="Left Smoke", kind="print"),)),
+            LanePlanSettings(lane="right", stages=(StageSettings(name="Right Smoke", kind="print"),)),
+        ),
+    ))
+
+    assert station._run_plan_from_payload({}) is None
+    assert station._run_plan_from_payload({"lane": "right"}) is not None
+    assert station._run_plan_from_payload({"lane": "missing"}) is None

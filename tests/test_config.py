@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from embeint_htf_station.config import ConfigError, load_settings_from_yaml, parse_stage_settings
+from embeint_htf_station.config import (
+    ConfigError,
+    ProgrammerSettings,
+    load_settings_from_yaml,
+    parse_lane_plan_settings,
+    parse_lane_settings,
+    parse_stage_settings,
+)
 
 
 def test_load_settings_from_yaml_expands_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,6 +236,161 @@ def test_parse_stage_settings_supports_infuse_provisioning_uicr_entries() -> Non
     assert stages[0].uicr[0].value == "infuse_id"
     assert stages[0].uicr[0].width_bits == 64
     assert stages[0].uicr[0].byte_order == "little"
+
+
+def test_load_settings_from_yaml_parses_multi_lane_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTF_ORG_ID", "org-1")
+    monkeypatch.setenv("HTF_STATION_ID", "station-1")
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+programmers:
+  - name: jlink_1
+    kind: jlink
+  - name: jlink_2
+    kind: jlink
+lanes:
+  - name: left
+    programmer: jlink_1
+  - name: right
+    programmer: jlink_2
+plans:
+  - lane: left
+    stages:
+      - name: Left Erase
+        kind: nrfutil_device_recover
+      - name: Left Provisioning
+        kind: infuse_provisioning
+        locks: [infuse_api, board_pool:kudu]
+  - lane: right
+    stages:
+      - name: Right Erase
+        kind: nrfutil_device_recover
+      - name: Right Provisioning
+        kind: infuse_provisioning
+        locks: [infuse_api, board_pool:kudu]
+        after:
+          - lane: left
+            stage: Left Provisioning
+            outcome: passed
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings_from_yaml(config)
+
+    assert [lane.name for lane in settings.lanes] == ["left", "right"]
+    assert [plan.lane for plan in settings.plans] == ["left", "right"]
+    assert settings.plans[0].stages[0].programmer == "jlink_1"
+    assert settings.plans[1].stages[0].programmer == "jlink_2"
+    assert settings.plans[0].stages[1].locks == ("infuse_api", "board_pool:kudu")
+    assert settings.plans[1].stages[1].after[0].lane == "left"
+    assert settings.plans[1].stages[1].after[0].stage == "Left Provisioning"
+    assert settings.plans[1].stages[1].after[0].outcome == "passed"
+
+
+def test_parse_lane_plan_settings_wraps_flat_stages_as_default_plan() -> None:
+    stages = parse_stage_settings({
+        "stages": [{
+            "name": "Smoke",
+            "kind": "print",
+        }],
+    })
+
+    plans = parse_lane_plan_settings({}, fallback_stages=stages)
+
+    assert len(plans) == 1
+    assert plans[0].lane == "default"
+    assert plans[0].stages == stages
+
+
+def test_parse_lane_settings_rejects_unknown_programmer() -> None:
+    programmers = (ProgrammerSettings(name="jlink_1", kind="jlink"),)
+
+    with pytest.raises(ConfigError, match="unknown programmer: jlink_2"):
+        parse_lane_settings({
+            "lanes": [{
+                "name": "right",
+                "programmer": "jlink_2",
+            }],
+        }, programmers)
+
+
+def test_parse_lane_plan_settings_requires_plans_for_lanes() -> None:
+    with pytest.raises(ConfigError, match="'plans' is required"):
+        parse_lane_plan_settings({}, lanes=parse_lane_settings({
+            "lanes": [{
+                "name": "left",
+                "programmer": "jlink_1",
+            }],
+        }))
+
+
+def test_parse_lane_plan_settings_rejects_unknown_dependency_stage() -> None:
+    lanes = parse_lane_settings({
+        "lanes": [
+            {"name": "left", "programmer": "jlink_1"},
+            {"name": "right", "programmer": "jlink_2"},
+        ],
+    })
+
+    with pytest.raises(ConfigError, match="left.Missing Stage"):
+        parse_lane_plan_settings({
+            "plans": [
+                {
+                    "lane": "left",
+                    "stages": [{"name": "Left Erase", "kind": "print"}],
+                },
+                {
+                    "lane": "right",
+                    "stages": [{
+                        "name": "Right Erase",
+                        "kind": "print",
+                        "after": [{"lane": "left", "stage": "Missing Stage"}],
+                    }],
+                },
+            ],
+        }, lanes)
+
+
+def test_runtime_plan_parser_uses_local_programmers_and_rejects_dependency_cycles() -> None:
+    from embeint_htf_station.config import parse_runtime_plans_from_yaml_text
+
+    with pytest.raises(ConfigError, match="cycle"):
+        parse_runtime_plans_from_yaml_text("""
+lanes:
+  - name: left
+    programmer: jlink_1
+  - name: right
+    programmer: jlink_2
+plans:
+  - lane: left
+    stages:
+      - name: flash
+        after: [{lane: right, stage: flash}]
+  - lane: right
+    stages:
+      - name: flash
+        after: [{lane: left, stage: flash}]
+""", (ProgrammerSettings(name="jlink_1", kind="jlink"), ProgrammerSettings(name="jlink_2", kind="jlink")))
+
+
+def test_lane_config_rejects_duplicate_programmer_and_stage_locks() -> None:
+    with pytest.raises(ConfigError, match="duplicates programmer assignment"):
+        parse_lane_settings({"lanes": [
+            {"name": "left", "programmer": "jlink_1"},
+            {"name": "right", "programmer": "jlink_1"},
+        ]})
+
+    with pytest.raises(ConfigError, match="locks must be unique"):
+        parse_stage_settings({"stages": [{"name": "flash", "locks": ["api", "api"]}]})
 
 
 def test_load_settings_from_yaml_reads_sibling_dotenv(tmp_path: Path) -> None:

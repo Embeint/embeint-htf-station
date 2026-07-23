@@ -12,7 +12,10 @@ from urllib.request import Request, urlopen
 
 import structlog
 
-from embeint_htf_station.config import ConfigError, Settings, parse_stage_settings_from_yaml_text
+from embeint_htf_station.config import (
+    ConfigError, Settings, StageSettings,
+    parse_runtime_plans_from_yaml_text,
+)
 from embeint_htf_station.contracts.mqtt import (
     Command,
     Heartbeat,
@@ -55,6 +58,20 @@ class RuntimeConfiguration:
     yaml: str
 
 
+@dataclass(frozen=True)
+class _RunPlan:
+    lane: str
+    stages: tuple[StageSettings, ...]
+
+
+@dataclass(frozen=True)
+class _QueuedRun:
+    run_id: str | None
+    dut_id: str
+    plan: _RunPlan
+    batch_results: Mapping[tuple[str, str], asyncio.Future[str]]
+
+
 class StageScopedLogger:
     def __init__(
         self,
@@ -86,6 +103,11 @@ def _sanitize_log_text(value: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", value).replace("\x00", "")
 
 
+def _task_run_id(task: asyncio.Task[TestResult]) -> str | None:
+    value = getattr(task, "run_id", None)
+    return value if isinstance(value, str) else None
+
+
 class BasicStation:
     """Minimal station used to validate the server-to-station pipeline."""
 
@@ -97,7 +119,14 @@ class BasicStation:
     ) -> None:
         self._settings = settings
         self._stages = list(settings.stages)
+        self._plans = {
+            plan.lane: _RunPlan(lane=plan.lane, stages=plan.stages)
+            for plan in settings.plans
+        } or {
+            "default": _RunPlan(lane="default", stages=tuple(settings.stages)),
+        }
         self._runtime_config_revision: int | None = None
+        self._stage_locks: dict[str, asyncio.Lock] = {}
         self._programmers = {programmer.name: programmer for programmer in settings.programmers}
         self._firmware_cache = FirmwareCache(settings)
         self._stage_factories = default_stage_factories()
@@ -115,8 +144,9 @@ class BasicStation:
 
     async def run_once(self, dut_id: str) -> TestResult:
         await self._load_runtime_configuration()
+        plan = self._default_run_plan()
         async with connect(self._settings) as client:
-            return await self._run_test(client, dut_id, run_id=None)
+            return await self._run_test(client, dut_id, run_id=None, stages=plan.stages, lane=plan.lane)
 
     async def serve_forever(self) -> None:
         await self._load_runtime_configuration()
@@ -124,15 +154,16 @@ class BasicStation:
             await client.subscribe(f"{self._settings.topic_prefix}/cmd", qos=1)
             log.info("basic_station.subscribed", topic=f"{self._settings.topic_prefix}/cmd")
 
-            current_run_id: str | None = None
-            current_run_task: asyncio.Task[TestResult] | None = None
+            active_runs: dict[str, asyncio.Task[TestResult]] = {}
+            lane_queues: dict[str, asyncio.Queue[_QueuedRun]] = {lane: asyncio.Queue() for lane in self._plans}
+            lane_workers: dict[str, asyncio.Task[None]] = {
+                lane: asyncio.create_task(self._lane_worker(client, lane, queue, active_runs))
+                for lane, queue in lane_queues.items()
+            }
             heartbeat_task = asyncio.create_task(
                 self._serve_heartbeat_loop(
                     client,
-                    lambda: (
-                        "running" if current_run_task and not current_run_task.done() else "idle",
-                        current_run_id if current_run_task and not current_run_task.done() else None,
-                    ),
+                    lambda: self._active_run_state(active_runs),
                 ),
             )
 
@@ -149,54 +180,178 @@ class BasicStation:
 
                     if command.kind == "abort-run":
                         run_id = payload.get("runId")
-                        if isinstance(run_id, str) and current_run_task and not current_run_task.done() and run_id == current_run_id:
+                        task = self._find_active_run_by_id(active_runs, run_id)
+                        if task is not None:
                             log.info("basic_station.abort_requested", run_id=run_id)
-                            current_run_task.cancel()
+                            task.cancel()
                         else:
-                            log.warning("basic_station.abort_ignored", run_id=run_id, active_run_id=current_run_id)
+                            await self._abort_queued_run(client, lane_queues, run_id)
+                        continue
+
+                    if command.kind == "run-batch":
+                        await self._enqueue_batch(client, payload, lane_queues)
                         continue
 
                     if command.kind != "run-plan":
                         log.info("basic_station.command_ignored", kind=command.kind)
                         continue
 
-                    if current_run_task and not current_run_task.done():
-                        log.warning("basic_station.run_ignored_busy", active_run_id=current_run_id)
-                        continue
-
                     dut_id = payload.get("dutId")
                     if not isinstance(dut_id, str) or not dut_id.strip():
                         log.warning("basic_station.command_missing_dut_id")
+                        if isinstance(payload.get("runId"), str):
+                            await self._publish_terminal_error(client, payload["runId"], "unknown", "command missing DUT ID")
                         continue
 
+                    plan = self._run_plan_from_payload(payload)
+                    if plan is None:
+                        if isinstance(payload.get("runId"), str):
+                            await self._publish_terminal_error(client, payload["runId"], dut_id.strip(), "invalid or stale lane command")
+                        continue
                     run_id = payload.get("runId")
                     current_run_id = run_id if isinstance(run_id, str) else None
-                    current_run_task = asyncio.create_task(self._run_test(
-                        client,
-                        dut_id.strip(),
-                        run_id=current_run_id,
-                    ))
-                    current_run_task.add_done_callback(self._log_run_task_result)
+                    await lane_queues[plan.lane].put(_QueuedRun(current_run_id, dut_id.strip(), plan, {}))
             finally:
                 heartbeat_task.cancel()
+                for task in active_runs.values():
+                    task.cancel()
+                for worker in lane_workers.values():
+                    worker.cancel()
                 try:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
+                if active_runs:
+                    await asyncio.gather(*active_runs.values(), return_exceptions=True)
+                await asyncio.gather(*lane_workers.values(), return_exceptions=True)
 
-    async def _run_test(self, client: _Publisher, dut_id: str, run_id: str | None) -> TestResult:
+    async def _enqueue_batch(
+        self, client: _Publisher, payload: dict[str, object], lane_queues: Mapping[str, asyncio.Queue[_QueuedRun]],
+    ) -> None:
+        entries = payload.get("runs")
+        if not isinstance(entries, list):
+            log.warning("basic_station.batch_invalid", error="runs is required")
+            return
+        futures: dict[tuple[str, str], asyncio.Future[str]] = {}
+        parsed: list[tuple[str, str, str]] = []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            run_id, lane, dut_id = item.get("runId"), item.get("lane"), item.get("dutId")
+            if not all(isinstance(value, str) and value.strip() for value in (run_id, lane, dut_id)) or lane not in self._plans:
+                if isinstance(run_id, str) and isinstance(dut_id, str):
+                    await self._publish_terminal_error(client, run_id, dut_id, "invalid batch lane or DUT")
+                continue
+            if (lane, "__run__") in futures:
+                await self._publish_terminal_error(client, run_id, dut_id, "duplicate lane in batch")
+                continue
+            futures[(lane, "__run__")] = asyncio.get_running_loop().create_future()
+            for stage in self._plans[lane].stages:
+                futures[(lane, stage.name)] = asyncio.get_running_loop().create_future()
+            parsed.append((run_id, lane, dut_id))
+        for run_id, lane, dut_id in parsed:
+            await lane_queues[lane].put(_QueuedRun(run_id, dut_id, self._plans[lane], futures))
+
+    async def _lane_worker(
+        self, client: _Publisher, lane: str, queue: asyncio.Queue[_QueuedRun], active_runs: dict[str, asyncio.Task[TestResult]],
+    ) -> None:
+        while True:
+            queued = await queue.get()
+            task = asyncio.create_task(self._run_test(
+                client, queued.dut_id, queued.run_id, stages=queued.plan.stages, lane=lane,
+                publish_idle_on_finish=False, batch_results=queued.batch_results,
+            ))
+            setattr(task, "run_id", queued.run_id)
+            active_runs[lane] = task
+            try:
+                result = await task
+                future = queued.batch_results.get((lane, "__run__"))
+                if future is not None and not future.done():
+                    future.set_result(result.outcome)
+            except asyncio.CancelledError:
+                future = queued.batch_results.get((lane, "__run__"))
+                if future is not None and not future.done():
+                    future.set_result("aborted")
+                raise
+            except Exception:
+                future = queued.batch_results.get((lane, "__run__"))
+                if future is not None and not future.done():
+                    future.set_result("error")
+                log.exception("basic_station.run_task_failed")
+            finally:
+                if active_runs.get(lane) is task:
+                    active_runs.pop(lane, None)
+                queue.task_done()
+
+    async def _abort_queued_run(self, client: _Publisher, queues: Mapping[str, asyncio.Queue[_QueuedRun]], run_id: object) -> None:
+        if not isinstance(run_id, str):
+            return
+        for queue in queues.values():
+            retained: list[_QueuedRun] = []
+            while not queue.empty():
+                item = queue.get_nowait()
+                queue.task_done()
+                if item.run_id == run_id:
+                    await self._publish_aborted_without_stages(client, item.run_id, item.dut_id)
+                    future = item.batch_results.get((item.plan.lane, "__run__"))
+                    if future is not None and not future.done():
+                        future.set_result("aborted")
+                    return
+                retained.append(item)
+            for item in retained:
+                await queue.put(item)
+
+    async def _publish_aborted_without_stages(self, client: _Publisher, run_id: str | None, dut_id: str) -> None:
+        now = datetime.now(UTC)
+        await self._publish_result(client, TestResult(run_id, dut_id, "aborted", self._runtime_config_revision, now, now, ()))
+
+    async def _publish_terminal_error(self, client: _Publisher, run_id: str, dut_id: str, reason: str) -> None:
+        now = datetime.now(UTC)
+        logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id)
+        await logger.start()
+        await logger.log("error", reason)
+        await logger.stop()
+        await self._publish_result(client, TestResult(run_id, dut_id, "error", self._runtime_config_revision, now, now, ()))
+
+    async def _run_test(
+        self,
+        client: _Publisher,
+        dut_id: str,
+        run_id: str | None,
+        *,
+        stages: Sequence[StageSettings] | None = None,
+        lane: str = "default",
+        publish_idle_on_finish: bool = True,
+        batch_results: Mapping[tuple[str, str], asyncio.Future[str]] = {},
+    ) -> TestResult:
         started_at = datetime.now(UTC)
         logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id)
+        run_stages = tuple(stages) if stages is not None else tuple(self._stages)
         await logger.start()
         try:
             await self._publish_heartbeat(client, "running", run_id=run_id)
-            await logger.log("info", f"starting basic test for DUT {dut_id}")
-            for index, stage in enumerate(self._stages):
+            await logger.log("info", f"starting basic test for DUT {dut_id} on lane {lane}")
+            for index, stage in enumerate(run_stages):
                 await self._publish_stage_update(client, run_id, index, stage.name, "pending")
 
             run_context = StageContext(dut_id=dut_id, run_id=run_id)
             stages: list[StageResult] = []
-            for index, stage_settings in enumerate(self._stages):
+            for index, stage_settings in enumerate(run_stages):
+                for dependency in stage_settings.after:
+                    prerequisite = batch_results.get((dependency.lane, dependency.stage))
+                    if prerequisite is None or await prerequisite != dependency.outcome:
+                        now = datetime.now(UTC)
+                        failed = StageResult(stage_settings.name, "failed", now, now)
+                        stages.append(failed)
+                        self._complete_stage_future(batch_results, lane, failed.name, "failed")
+                        await self._publish_stage_update(client, run_id, index, failed.name, "failed")
+                        for remaining_index, remaining in enumerate(run_stages[index + 1:], index + 1):
+                            self._complete_stage_future(batch_results, lane, remaining.name, "aborted")
+                            await self._publish_stage_update(client, run_id, remaining_index, remaining.name, "aborted")
+                        result = TestResult(run_id, dut_id, "failed", self._runtime_config_revision, started_at, now, tuple(stages))
+                        await logger.log("error", f"dependency {dependency.lane}.{dependency.stage} did not reach {dependency.outcome}")
+                        await self._publish_result(client, result)
+                        return result
                 await self._publish_stage_update(client, run_id, index, stage_settings.name, "running")
                 stage_logger = StageScopedLogger(
                     logger,
@@ -207,10 +362,14 @@ class BasicStation:
                 await stage_logger.start()
                 stage_started_at = datetime.now(UTC)
                 try:
-                    stage_result = await create_stage(stage_settings, self._stage_factories).run(
-                        stage_logger,
-                        run_context,
-                    )
+                    locks = [self._stage_locks.setdefault(name, asyncio.Lock()) for name in sorted(stage_settings.locks)]
+                    for lock in locks:
+                        await lock.acquire()
+                    try:
+                        stage_result = await create_stage(stage_settings, self._stage_factories).run(stage_logger, run_context)
+                    finally:
+                        for lock in reversed(locks):
+                            lock.release()
                 except asyncio.CancelledError:
                     finished_at = datetime.now(UTC)
                     await stage_logger.log("warning", "stage aborted")
@@ -221,7 +380,11 @@ class BasicStation:
                         finished_at=finished_at,
                     )
                     stages.append(stage_result)
+                    self._complete_stage_future(batch_results, lane, stage_result.name, stage_result.outcome)
                     await self._publish_stage_update(client, run_id, index, stage_result.name, stage_result.outcome)
+                    for remaining_index, remaining in enumerate(run_stages[index + 1:], index + 1):
+                        self._complete_stage_future(batch_results, lane, remaining.name, "aborted")
+                        await self._publish_stage_update(client, run_id, remaining_index, remaining.name, "aborted")
                     result = TestResult(
                         run_id=run_id,
                         dut_id=dut_id,
@@ -236,6 +399,7 @@ class BasicStation:
                     log.info("basic_test.finished", dut_id=dut_id, outcome="aborted")
                     return result
                 stages.append(stage_result)
+                self._complete_stage_future(batch_results, lane, stage_result.name, stage_result.outcome)
                 await self._publish_stage_update(client, run_id, index, stage_result.name, stage_result.outcome)
 
             outcome = "passed" if all(stage.outcome == "passed" for stage in stages) else "failed"
@@ -256,7 +420,70 @@ class BasicStation:
             return result
         finally:
             await logger.stop()
-            await self._publish_heartbeat(client, "idle")
+            if publish_idle_on_finish:
+                await self._publish_heartbeat(client, "idle")
+
+    def _default_run_plan(self) -> _RunPlan:
+        if len(self._plans) == 1:
+            return next(iter(self._plans.values()))
+        if "default" in self._plans:
+            return self._plans["default"]
+        raise ConfigError("multiple station lanes are configured; run command requires a lane")
+
+    @staticmethod
+    def _complete_stage_future(
+        results: Mapping[tuple[str, str], asyncio.Future[str]], lane: str, stage: str, outcome: str,
+    ) -> None:
+        future = results.get((lane, stage))
+        if future is not None and not future.done():
+            future.set_result(outcome)
+
+    def _run_plan_from_payload(self, payload: dict[str, object]) -> _RunPlan | None:
+        requested_lane = payload.get("lane")
+        if requested_lane is None or requested_lane == "":
+            try:
+                return self._default_run_plan()
+            except ConfigError as exc:
+                log.warning("basic_station.command_missing_lane", error=str(exc))
+                return None
+        if not isinstance(requested_lane, str):
+            log.warning("basic_station.command_invalid_lane", lane=requested_lane)
+            return None
+
+        plan = self._plans.get(requested_lane.strip())
+        if plan is None:
+            log.warning("basic_station.command_unknown_lane", lane=requested_lane)
+            return None
+        return plan
+
+    @staticmethod
+    def _active_run_state(active_runs: Mapping[str, asyncio.Task[TestResult]]) -> tuple[str, str | None]:
+        for task in active_runs.values():
+            if not task.done():
+                return "running", _task_run_id(task)
+        return "idle", None
+
+    @staticmethod
+    def _find_active_run_by_id(
+        active_runs: Mapping[str, asyncio.Task[TestResult]],
+        run_id: object,
+    ) -> asyncio.Task[TestResult] | None:
+        if not isinstance(run_id, str):
+            return None
+        for task in active_runs.values():
+            if not task.done() and _task_run_id(task) == run_id:
+                return task
+        return None
+
+    def _log_and_forget_lane_task(
+        self,
+        active_runs: dict[str, asyncio.Task[TestResult]],
+        lane: str,
+        task: asyncio.Task[TestResult],
+    ) -> None:
+        self._log_run_task_result(task)
+        if active_runs.get(lane) is task:
+            active_runs.pop(lane, None)
 
     @staticmethod
     def _log_run_task_result(task: asyncio.Task[TestResult]) -> None:
@@ -343,7 +570,9 @@ class BasicStation:
             return None
 
         try:
-            self._stages = list(parse_stage_settings_from_yaml_text(config.yaml))
+            lanes, plans = parse_runtime_plans_from_yaml_text(config.yaml, self._settings.programmers)
+            self._plans = {plan.lane: _RunPlan(plan.lane, plan.stages) for plan in plans}
+            self._stages = list(next(iter(self._plans.values())).stages)
         except ConfigError as exc:
             log.warning("basic_station.configuration_invalid", revision=config.revision, error=str(exc))
             return config
