@@ -28,6 +28,15 @@ target-version = "py314"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[tool.coverage.run]
+branch = true
+source = ["src/embeint_htf_station"]
+
+[tool.coverage.report]
+fail_under = 55
+show_missing = true
+skip_covered = true
+
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]
 build-backend = "uv_build"
@@ -37,5 +46,6 @@ dev = [
     "mypy>=1.20.1",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15.11",
 ]
