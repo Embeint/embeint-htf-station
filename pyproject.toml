@@ -41,7 +41,7 @@ branch = true
 source = ["src/embeint_htf_station"]
 
 [tool.coverage.report]
-fail_under = 55
+fail_under = 60
 show_missing = true
 skip_covered = true
 

@@ -20,7 +20,26 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv run ruff check .
-      - run: uv run pytest
+      - name: Test with coverage
+        run: uv run pytest --cov=embeint_htf_station --cov-report=term-missing --cov-report=xml:coverage.xml
+      - name: Report coverage
+        run: |
+          python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as et
+
+          root = et.parse("coverage.xml").getroot()
+          line_rate = float(root.attrib["line-rate"]) * 100
+          branch_rate = float(root.attrib["branch-rate"]) * 100
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Station coverage\n\n")
+              summary.write("| Lines | Branches | Enforced line floor |\n|---:|---:|---:|\n")
+              summary.write(f"| {line_rate:.2f}% | {branch_rate:.2f}% | 60% |\n")
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: station-coverage
+          path: coverage.xml
       - run: ./scripts/gen-mqtt-contracts.sh
       - run: git diff --exit-code -- src/embeint_htf_station/contracts/mqtt.py
       - run: uv build
