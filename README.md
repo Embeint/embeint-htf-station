@@ -1,63 +1,59 @@
-# station/
+# Embeint HTF Station
 
-Python 3.14 runtime for the HTF station. Subscribes to commands from the server over MQTT, drives the programmer and DUT, and streams logs back.
+An extensible Python runtime for Embeint Hardware Test Framework (HTF) stations. It subscribes to commands over MQTT, drives programmers and DUTs, and reports logs and results to a compatible HTF server.
+
+The server and web UI are separate private deployments. This repository contains the station runtime, sample stations, and the public MQTT wire contract only.
+
+## Install
+
+```sh
+uv add embeint-htf-station
+```
+
+For a development checkout:
+
+```sh
+uv sync --all-groups
+uv run pytest
+```
+
+## Compatibility
+
+The MQTT contract is versioned in [`protocol/asyncapi.yaml`](protocol/asyncapi.yaml). Station releases use semantic versioning and are tagged as `vX.Y.Z`.
+
+- Patch releases do not change the wire contract.
+- Minor releases may add backwards-compatible fields or messages.
+- Major releases may require a compatible server upgrade.
+
+Pin the station version in an HTF workspace with the `west.yml` manifest supplied by the private server repository. Application projects should depend on released package versions through `uv`/PyPI; use an editable dependency only while developing the runtime itself.
 
 ## Layout
 
 ```
 src/embeint_htf_station/
-├── cli.py                    # click entry points
-├── config.py                 # pydantic-settings
-├── messaging/
-│   ├── client.py             # aiomqtt wrapper + heartbeat
-│   └── batch_logger.py       # 500ms / 4KB log batching (v1 lesson)
-├── programmers/              # J-Link, OpenOCD, nrfutil adapters
-├── runners/                  # Test plan execution
+├── cli.py                    # Click entry points
+├── config.py                 # Pydantic settings
+├── messaging/                # MQTT client and batched logs
+├── programmers/              # J-Link, OpenOCD, and nrfutil adapters
 ├── stages/                   # Reusable stage implementations
-└── contracts/                # Generated from ../proto/ (run ../proto/scripts/gen-python.sh)
+├── stations/                 # Station runtimes
+└── contracts/                # Generated from protocol/asyncapi.yaml
 ```
 
-## Run
+## Samples
 
 ```sh
-cd station
-uv sync
-HTF_ORG_ID=... HTF_STATION_ID=... uv run htf-station run
-```
-
-## Basic station sample
-
-The basic station sample is a pipeline smoke test. It accepts a DUT id, connects
-to MQTT using the existing station contract, runs the configured stage list,
-logs the run, and finishes with a local `passed` result.
-
-```sh
-cd station
 cp samples/basic-station/.env.example samples/basic-station/.env
 uv run python samples/basic-station/main.py DUT-001
 ```
 
-To run it from the web kiosk flow, start the sample in MQTT listen mode:
+Configuration reads identity and credentials from environment variables, so secrets remain outside source control. Library-provided stages live under `src/embeint_htf_station/stages/`; samples can register their own stage factories.
+
+## Contract generation
+
+The generated MQTT models are committed to the package. Regenerate them after changing the AsyncAPI contract:
 
 ```sh
-cd station
-uv run python samples/basic-station/main.py --listen
-```
-
-Configuration lives in `samples/basic-station/config.yaml`. MQTT and station
-identity values are referenced as environment variables so secrets and station
-keys do not need to be committed. A sibling `.env` file is loaded automatically
-when present, with already-exported environment variables taking priority.
-Stages are configured in the same YAML file. The default sample stage prints
-`testing`, waits five seconds, and reports the stage as passed.
-
-Library-provided stages live under `src/embeint_htf_station/stages/`, with each
-stage in its own file. Sample-specific stages can be registered from
-`samples/basic-station/main.py` by passing a `stage_factories` mapping into
-`BasicStation`.
-
-## Test
-
-```sh
-uv run pytest
+./scripts/gen-mqtt-contracts.sh
+git diff --exit-code -- src/embeint_htf_station/contracts
 ```

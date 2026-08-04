@@ -1,0 +1,221 @@
+asyncapi: 3.0.0
+info:
+  title: Embeint HTF MQTT
+  version: 0.1.0
+  description: Station <-> server MQTT wire protocol.
+
+servers:
+  local:
+    host: localhost:1883
+    protocol: mqtt
+
+channels:
+  stationHeartbeat:
+    address: htf/v1/{orgId}/{stationId}/heartbeat
+    parameters:
+      orgId:
+        description: Org UUID
+      stationId:
+        description: Station UUID
+    messages:
+      heartbeat:
+        $ref: "#/components/messages/Heartbeat"
+
+  stationLog:
+    address: htf/v1/{orgId}/{stationId}/log
+    parameters:
+      orgId: { description: Org UUID }
+      stationId: { description: Station UUID }
+    messages:
+      logBatch:
+        $ref: "#/components/messages/LogBatch"
+
+  stationStage:
+    address: htf/v1/{orgId}/{stationId}/stage
+    parameters:
+      orgId: { description: Org UUID }
+      stationId: { description: Station UUID }
+    messages:
+      stage:
+        $ref: "#/components/messages/Stage"
+
+  stationResult:
+    address: htf/v1/{orgId}/{stationId}/result
+    parameters:
+      orgId: { description: Org UUID }
+      stationId: { description: Station UUID }
+    messages:
+      result:
+        $ref: "#/components/messages/TestResult"
+
+  runCommand:
+    address: htf/v1/{orgId}/{stationId}/cmd
+    parameters:
+      orgId: { description: Org UUID }
+      stationId: { description: Station UUID }
+    messages:
+      command:
+        $ref: "#/components/messages/Command"
+
+operations:
+  publishHeartbeat:
+    action: send
+    channel:
+      $ref: "#/channels/stationHeartbeat"
+  publishLog:
+    action: send
+    channel:
+      $ref: "#/channels/stationLog"
+  publishStage:
+    action: send
+    channel:
+      $ref: "#/channels/stationStage"
+  publishResult:
+    action: send
+    channel:
+      $ref: "#/channels/stationResult"
+  sendCommand:
+    action: receive
+    channel:
+      $ref: "#/channels/runCommand"
+
+components:
+  messages:
+    Heartbeat:
+      name: Heartbeat
+      payload:
+        $ref: "#/components/schemas/Heartbeat"
+    LogBatch:
+      name: LogBatch
+      payload:
+        $ref: "#/components/schemas/LogBatch"
+    TestResult:
+      name: TestResult
+      payload:
+        $ref: "#/components/schemas/TestResult"
+    Stage:
+      name: Stage
+      payload:
+        $ref: "#/components/schemas/Stage"
+    Command:
+      name: Command
+      payload:
+        $ref: "#/components/schemas/Command"
+
+  schemas:
+    Heartbeat:
+      type: object
+      required: [ts, status]
+      properties:
+        ts:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [idle, running, error]
+        currentRunId:
+          type: string
+          format: uuid
+          nullable: true
+
+    LogBatch:
+      type: object
+      required: [ts, entries]
+      properties:
+        ts:
+          type: string
+          format: date-time
+        runId:
+          type: string
+          format: uuid
+          nullable: true
+        entries:
+          type: array
+          items:
+            type: object
+            required: [t, lvl, msg]
+            properties:
+              t:
+                type: string
+                format: date-time
+              lvl:
+                type: string
+                enum: [debug, info, warn, warning, error]
+              msg:
+                type: string
+
+    TestResult:
+      type: object
+      required: [ts, dutId, outcome, startedAt, finishedAt]
+      properties:
+        ts:
+          type: string
+          format: date-time
+        runId:
+          type: string
+          format: uuid
+          nullable: true
+        dutId:
+          type: string
+        outcome:
+          type: string
+          enum: [passed, failed, aborted, error]
+        configRevision:
+          type: integer
+          nullable: true
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        stages:
+          type: array
+          items:
+            type: object
+            required: [name, outcome, startedAt, finishedAt]
+            properties:
+              name:
+                type: string
+              outcome:
+                type: string
+                enum: [passed, failed, aborted, error]
+              startedAt:
+                type: string
+                format: date-time
+              finishedAt:
+                type: string
+                format: date-time
+
+    Stage:
+      type: object
+      required: [ts, index, name, status]
+      properties:
+        ts:
+          type: string
+          format: date-time
+        runId:
+          type: string
+          format: uuid
+          nullable: true
+        index:
+          type: integer
+        name:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, passed, failed, aborted, error]
+
+    Command:
+      type: object
+      required: [id, kind]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [run-plan, run-batch, abort-run, reboot]
+        payload:
+          type: object
+          additionalProperties: true

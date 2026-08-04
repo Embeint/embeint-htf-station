@@ -1,8 +1,10 @@
 [project]
 name = "embeint-htf-station"
 version = "0.1.0"
-description = "Add your description here"
+description = "Extensible Python runtime for Embeint hardware test stations"
 readme = "README.md"
+license = "Apache-2.0"
+keywords = ["hardware-testing", "manufacturing", "mqtt", "test-station"]
 authors = [
     { name = "Karl Von Richter", email = "karl@embeint.com" }
 ]
@@ -15,6 +17,12 @@ dependencies = [
     "pyyaml>=6.0.3",
     "structlog>=25.5.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Embeint/embeint-htf-station"
+Documentation = "https://github.com/Embeint/embeint-htf-station#readme"
+Repository = "https://github.com/Embeint/embeint-htf-station"
+Issues = "https://github.com/Embeint/embeint-htf-station/issues"
 
 [project.scripts]
 embeint-htf-station = "embeint_htf_station:main"
