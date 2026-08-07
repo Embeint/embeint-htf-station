@@ -12,6 +12,23 @@ from embeint_htf_station.config import (
 )
 
 
+def test_two_programmer_infuse_jig_sample_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTF_ORG_ID", "org-1")
+    monkeypatch.setenv("HTF_STATION_ID", "station-1")
+
+    config = Path(__file__).parents[1] / "samples/two-programmer-infuse-jig/config.yaml"
+    settings = load_settings_from_yaml(config)
+
+    assert [lane.name for lane in settings.lanes] == ["left", "right"]
+    assert [plan.lane for plan in settings.plans] == ["left", "right"]
+    assert settings.plans[0].stages[0].programmer == "jlink_left"
+    assert settings.plans[1].stages[0].programmer == "jlink_right"
+    right_provisioning = settings.plans[1].stages[2]
+    assert right_provisioning.locks == ("infuse_api", "board_pool:kudu")
+    assert right_provisioning.after[0].lane == "left"
+    assert right_provisioning.after[0].stage == "Left provisioning"
+
+
 def test_load_settings_from_yaml_expands_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HTF_MQTT_HOST", "broker.local")
     monkeypatch.setenv("HTF_MQTT_PORT", "1884")
