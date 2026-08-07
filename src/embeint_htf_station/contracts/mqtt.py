@@ -34,18 +34,18 @@ class Heartbeat(ContractModel):
     ts: datetime = Field(...)
     status: Literal['idle', 'running', 'error'] = Field(...)
     current_run_id: UUID | None = Field(default=None, alias="currentRunId")
-    active_lanes: list[HeartbeatActiveLanesItem] | None = Field(default=None, alias="activeLanes")
+    active_lanes: list[HeartbeatActiveLanesItem] = Field(alias="activeLanes")
 
 class LogBatch(ContractModel):
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
-    lane: str | None = Field(default=None, alias="lane")
+    lane: str = Field(...)
     entries: list[LogBatchEntriesItem] = Field(...)
 
 class TestResult(ContractModel):
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
-    lane: str | None = Field(default=None, alias="lane")
+    lane: str = Field(...)
     dut_id: str = Field(alias="dutId")
     outcome: Literal['passed', 'failed', 'aborted', 'error'] = Field(...)
     config_revision: int | None = Field(default=None, alias="configRevision")
@@ -56,7 +56,7 @@ class TestResult(ContractModel):
 class Stage(ContractModel):
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
-    lane: str | None = Field(default=None, alias="lane")
+    lane: str = Field(...)
     index: int = Field(...)
     name: str = Field(...)
     status: Literal['pending', 'blocked', 'running', 'passed', 'failed', 'aborted', 'error'] = Field(...)

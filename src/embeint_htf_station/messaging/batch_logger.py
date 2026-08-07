@@ -28,7 +28,7 @@ class BatchLogger:
     FLUSH_INTERVAL_S = 0.5
     FLUSH_BYTES = 4 * 1024
 
-    def __init__(self, client: aiomqtt.Client, topic: str, run_id: str | None = None, lane: str | None = None) -> None:
+    def __init__(self, client: aiomqtt.Client, topic: str, run_id: str | None = None, lane: str = "default") -> None:
         self._client = client
         self._topic = topic
         self._run_id = run_id
