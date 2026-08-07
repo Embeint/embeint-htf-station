@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from embeint_htf_station.config import LanePlanSettings, LaneSettings, Settings, StageDependencySettings, StageSettings
 from embeint_htf_station.stages import StageContext, StageResult
-from embeint_htf_station.stations.basic import BasicStation, _QueuedRun
+from embeint_htf_station.stations.basic import BasicStation, _LaneActivity, _QueuedRun
 
 
 class Publisher:
@@ -50,6 +50,31 @@ async def test_shared_stage_lock_serializes_concurrent_lanes() -> None:
         station._run_test(publisher, "R", str(uuid4()), stages=right.stages, lane="right"),
     )
     assert ProbeStage.max_active == 1
+    stages = [payload for topic, payload in publisher.messages if topic.endswith("/stage")]
+    assert {payload["lane"] for payload in stages} == {"left", "right"}
+    assert any(payload["status"] == "blocked" for payload in stages)
+    results = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
+    assert {payload["lane"] for payload in results} == {"left", "right"}
+
+
+async def test_heartbeat_reports_active_lanes() -> None:
+    station, publisher = make_station(), Publisher()
+    left_run_id, right_run_id = str(uuid4()), str(uuid4())
+    await station._publish_heartbeat(
+        publisher,
+        "running",
+        run_id=left_run_id,
+        active_lanes=[
+            _LaneActivity("left", left_run_id, "LEFT-DUT", "running", "flash"),
+            _LaneActivity("right", right_run_id, "RIGHT-DUT", "blocked", "flash", "Waiting for resource lock shared"),
+        ],
+    )
+    heartbeat = next(payload for topic, payload in publisher.messages if topic.endswith("/heartbeat"))
+    assert heartbeat["currentRunId"] == left_run_id
+    assert heartbeat["activeLanes"] == [
+        {"lane": "left", "runId": left_run_id, "dutId": "LEFT-DUT", "status": "running", "currentStage": "flash", "waitingReason": None},
+        {"lane": "right", "runId": right_run_id, "dutId": "RIGHT-DUT", "status": "blocked", "currentStage": "flash", "waitingReason": "Waiting for resource lock shared"},
+    ]
 
 
 async def test_dependency_failure_finishes_only_dependent_lane_and_aborts_remainder() -> None:

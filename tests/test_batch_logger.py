@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 import pytest
 
@@ -19,12 +20,15 @@ class _FakeClient:
 @pytest.mark.asyncio
 async def test_flush_on_byte_threshold() -> None:
     client = _FakeClient()
-    logger = BatchLogger(client, "test/topic")
+    run_id = str(uuid4())
+    logger = BatchLogger(client, "test/topic", run_id=run_id, lane="left")
     big = "x" * (BatchLogger.FLUSH_BYTES + 1)
     await logger.log("info", big)
     assert len(client.published) == 1
     payload = json.loads(client.published[0][1])
     assert len(payload["entries"]) == 1
+    assert payload["runId"] == run_id
+    assert payload["lane"] == "left"
 
 
 @pytest.mark.asyncio

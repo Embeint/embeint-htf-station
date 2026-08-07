@@ -1,7 +1,7 @@
 asyncapi: 3.0.0
 info:
   title: Embeint HTF MQTT
-  version: 0.1.0
+  version: 0.2.0
   description: Station <-> server MQTT wire protocol.
 
 servers:
@@ -117,6 +117,31 @@ components:
           type: string
           format: uuid
           nullable: true
+        activeLanes:
+          type: array
+          description: Active lane state. Omitted by legacy single-lane stations.
+          items:
+            type: object
+            required: [lane, status]
+            properties:
+              lane:
+                type: string
+              runId:
+                type: string
+                format: uuid
+                nullable: true
+              dutId:
+                type: string
+                nullable: true
+              status:
+                type: string
+                enum: [queued, running, blocked]
+              currentStage:
+                type: string
+                nullable: true
+              waitingReason:
+                type: string
+                nullable: true
 
     LogBatch:
       type: object
@@ -128,6 +153,9 @@ components:
         runId:
           type: string
           format: uuid
+          nullable: true
+        lane:
+          type: string
           nullable: true
         entries:
           type: array
@@ -154,6 +182,9 @@ components:
         runId:
           type: string
           format: uuid
+          nullable: true
+        lane:
+          type: string
           nullable: true
         dutId:
           type: string
@@ -198,13 +229,16 @@ components:
           type: string
           format: uuid
           nullable: true
+        lane:
+          type: string
+          nullable: true
         index:
           type: integer
         name:
           type: string
         status:
           type: string
-          enum: [pending, running, passed, failed, aborted, error]
+          enum: [pending, blocked, running, passed, failed, aborted, error]
 
     Command:
       type: object

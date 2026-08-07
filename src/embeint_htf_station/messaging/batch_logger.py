@@ -28,10 +28,11 @@ class BatchLogger:
     FLUSH_INTERVAL_S = 0.5
     FLUSH_BYTES = 4 * 1024
 
-    def __init__(self, client: aiomqtt.Client, topic: str, run_id: str | None = None) -> None:
+    def __init__(self, client: aiomqtt.Client, topic: str, run_id: str | None = None, lane: str | None = None) -> None:
         self._client = client
         self._topic = topic
         self._run_id = run_id
+        self._lane = lane
         self._batch = _Batch()
         self._lock = asyncio.Lock()
         self._flusher: asyncio.Task[None] | None = None
@@ -71,6 +72,7 @@ class BatchLogger:
         payload = LogBatch(
             ts=datetime.now(UTC),
             runId=self._run_id,
+            lane=self._lane,
             entries=self._batch.entries,
         ).model_dump_json(by_alias=True)
         await self._client.publish(self._topic, payload=payload, qos=1)
