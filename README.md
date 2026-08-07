@@ -49,6 +49,18 @@ uv run python samples/basic-station/main.py DUT-001
 
 Configuration reads identity and credentials from environment variables, so secrets remain outside source control. Library-provided stages live under `src/embeint_htf_station/stages/`; samples can register their own stage factories.
 
+## Station credentials
+
+Create a station from the HTF operator UI and save the one-time `.env` output. Each station has its own MQTT username/password and API key:
+
+```sh
+HTF_MQTT_USERNAME=station-...
+HTF_MQTT_PASSWORD=st_mqtt_...
+HTF_API_KEY=st_api_...
+```
+
+Never reuse these values between stations. MQTT credentials are restricted by the broker to the station's own heartbeat, stage, log, and result topics, plus its command subscription. Rotate a credential in the operator UI after exposure; revoked credentials cannot reconnect or access station APIs.
+
 ## Contract generation
 
 The generated MQTT models are committed to the package. Regenerate them after changing the AsyncAPI contract:
