@@ -11,6 +11,14 @@ from pydantic import BaseModel, ConfigDict, Field
 class ContractModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+class HeartbeatActiveLanesItem(ContractModel):
+    lane: str = Field(...)
+    run_id: UUID | None = Field(default=None, alias="runId")
+    dut_id: str | None = Field(default=None, alias="dutId")
+    status: Literal['queued', 'running', 'blocked'] = Field(...)
+    current_stage: str | None = Field(default=None, alias="currentStage")
+    waiting_reason: str | None = Field(default=None, alias="waitingReason")
+
 class LogBatchEntriesItem(ContractModel):
     t: datetime = Field(...)
     lvl: Literal['debug', 'info', 'warn', 'warning', 'error'] = Field(...)
@@ -26,15 +34,18 @@ class Heartbeat(ContractModel):
     ts: datetime = Field(...)
     status: Literal['idle', 'running', 'error'] = Field(...)
     current_run_id: UUID | None = Field(default=None, alias="currentRunId")
+    active_lanes: list[HeartbeatActiveLanesItem] | None = Field(default=None, alias="activeLanes")
 
 class LogBatch(ContractModel):
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
+    lane: str | None = Field(default=None, alias="lane")
     entries: list[LogBatchEntriesItem] = Field(...)
 
 class TestResult(ContractModel):
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
+    lane: str | None = Field(default=None, alias="lane")
     dut_id: str = Field(alias="dutId")
     outcome: Literal['passed', 'failed', 'aborted', 'error'] = Field(...)
     config_revision: int | None = Field(default=None, alias="configRevision")
@@ -45,9 +56,10 @@ class TestResult(ContractModel):
 class Stage(ContractModel):
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
+    lane: str | None = Field(default=None, alias="lane")
     index: int = Field(...)
     name: str = Field(...)
-    status: Literal['pending', 'running', 'passed', 'failed', 'aborted', 'error'] = Field(...)
+    status: Literal['pending', 'blocked', 'running', 'passed', 'failed', 'aborted', 'error'] = Field(...)
 
 class Command(ContractModel):
     id: UUID = Field(...)

@@ -19,6 +19,7 @@ from embeint_htf_station.config import (
 from embeint_htf_station.contracts.mqtt import (
     Command,
     Heartbeat,
+    HeartbeatActiveLanesItem,
     Stage,
     TestResult as MqttTestResult,
     TestResultStagesItem,
@@ -70,6 +71,16 @@ class _QueuedRun:
     dut_id: str
     plan: _RunPlan
     batch_results: Mapping[tuple[str, str], asyncio.Future[str]]
+
+
+@dataclass
+class _LaneActivity:
+    lane: str
+    run_id: str | None
+    dut_id: str
+    status: str = "queued"
+    current_stage: str | None = None
+    waiting_reason: str | None = None
 
 
 class StageScopedLogger:
@@ -155,15 +166,16 @@ class BasicStation:
             log.info("basic_station.subscribed", topic=f"{self._settings.topic_prefix}/cmd")
 
             active_runs: dict[str, asyncio.Task[TestResult]] = {}
+            active_lanes: dict[str, _LaneActivity] = {}
             lane_queues: dict[str, asyncio.Queue[_QueuedRun]] = {lane: asyncio.Queue() for lane in self._plans}
             lane_workers: dict[str, asyncio.Task[None]] = {
-                lane: asyncio.create_task(self._lane_worker(client, lane, queue, active_runs))
+                lane: asyncio.create_task(self._lane_worker(client, lane, queue, active_runs, active_lanes))
                 for lane, queue in lane_queues.items()
             }
             heartbeat_task = asyncio.create_task(
                 self._serve_heartbeat_loop(
                     client,
-                    lambda: self._active_run_state(active_runs),
+                    lambda: self._active_run_state(active_runs, active_lanes),
                 ),
             )
 
@@ -253,13 +265,20 @@ class BasicStation:
             await lane_queues[lane].put(_QueuedRun(run_id, dut_id, self._plans[lane], futures))
 
     async def _lane_worker(
-        self, client: _Publisher, lane: str, queue: asyncio.Queue[_QueuedRun], active_runs: dict[str, asyncio.Task[TestResult]],
+        self,
+        client: _Publisher,
+        lane: str,
+        queue: asyncio.Queue[_QueuedRun],
+        active_runs: dict[str, asyncio.Task[TestResult]],
+        active_lanes: dict[str, _LaneActivity],
     ) -> None:
         while True:
             queued = await queue.get()
+            activity = _LaneActivity(lane=lane, run_id=queued.run_id, dut_id=queued.dut_id, status="running")
+            active_lanes[lane] = activity
             task = asyncio.create_task(self._run_test(
                 client, queued.dut_id, queued.run_id, stages=queued.plan.stages, lane=lane,
-                publish_idle_on_finish=False, batch_results=queued.batch_results,
+                publish_idle_on_finish=False, batch_results=queued.batch_results, activity=activity,
             ))
             setattr(task, "run_id", queued.run_id)
             active_runs[lane] = task
@@ -281,6 +300,8 @@ class BasicStation:
             finally:
                 if active_runs.get(lane) is task:
                     active_runs.pop(lane, None)
+                if active_lanes.get(lane) is activity:
+                    active_lanes.pop(lane, None)
                 queue.task_done()
 
     async def _abort_queued_run(self, client: _Publisher, queues: Mapping[str, asyncio.Queue[_QueuedRun]], run_id: object) -> None:
@@ -292,7 +313,7 @@ class BasicStation:
                 item = queue.get_nowait()
                 queue.task_done()
                 if item.run_id == run_id:
-                    await self._publish_aborted_without_stages(client, item.run_id, item.dut_id)
+                    await self._publish_aborted_without_stages(client, item.run_id, item.dut_id, item.plan.lane)
                     future = item.batch_results.get((item.plan.lane, "__run__"))
                     if future is not None and not future.done():
                         future.set_result("aborted")
@@ -301,17 +322,29 @@ class BasicStation:
             for item in retained:
                 await queue.put(item)
 
-    async def _publish_aborted_without_stages(self, client: _Publisher, run_id: str | None, dut_id: str) -> None:
+    async def _publish_aborted_without_stages(
+        self, client: _Publisher, run_id: str | None, dut_id: str, lane: str,
+    ) -> None:
         now = datetime.now(UTC)
-        await self._publish_result(client, TestResult(run_id, dut_id, "aborted", self._runtime_config_revision, now, now, ()))
+        await self._publish_result(
+            client,
+            TestResult(run_id, dut_id, "aborted", self._runtime_config_revision, now, now, ()),
+            lane,
+        )
 
-    async def _publish_terminal_error(self, client: _Publisher, run_id: str, dut_id: str, reason: str) -> None:
+    async def _publish_terminal_error(
+        self, client: _Publisher, run_id: str, dut_id: str, reason: str, lane: str = "default",
+    ) -> None:
         now = datetime.now(UTC)
-        logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id)
+        logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id, lane=lane)
         await logger.start()
         await logger.log("error", reason)
         await logger.stop()
-        await self._publish_result(client, TestResult(run_id, dut_id, "error", self._runtime_config_revision, now, now, ()))
+        await self._publish_result(
+            client,
+            TestResult(run_id, dut_id, "error", self._runtime_config_revision, now, now, ()),
+            lane,
+        )
 
     async def _run_test(
         self,
@@ -323,36 +356,50 @@ class BasicStation:
         lane: str = "default",
         publish_idle_on_finish: bool = True,
         batch_results: Mapping[tuple[str, str], asyncio.Future[str]] = {},
+        activity: _LaneActivity | None = None,
     ) -> TestResult:
         started_at = datetime.now(UTC)
-        logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id)
+        logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id, lane=lane)
         run_stages = tuple(stages) if stages is not None else tuple(self._stages)
         await logger.start()
         try:
-            await self._publish_heartbeat(client, "running", run_id=run_id)
+            await self._publish_heartbeat(client, "running", run_id=run_id, active_lanes=[activity] if activity else None)
             await logger.log("info", f"starting basic test for DUT {dut_id} on lane {lane}")
             for index, stage in enumerate(run_stages):
-                await self._publish_stage_update(client, run_id, index, stage.name, "pending")
+                await self._publish_stage_update(client, lane, run_id, index, stage.name, "pending")
 
             run_context = StageContext(dut_id=dut_id, run_id=run_id)
             stages: list[StageResult] = []
             for index, stage_settings in enumerate(run_stages):
                 for dependency in stage_settings.after:
                     prerequisite = batch_results.get((dependency.lane, dependency.stage))
-                    if prerequisite is None or await prerequisite != dependency.outcome:
+                    if activity is not None:
+                        activity.status = "blocked"
+                        activity.current_stage = stage_settings.name
+                        activity.waiting_reason = f"Waiting for {dependency.lane}.{dependency.stage}"
+                    await self._publish_stage_update(client, lane, run_id, index, stage_settings.name, "blocked")
+                    prerequisite_outcome = await prerequisite if prerequisite is not None else None
+                    if activity is not None:
+                        activity.status = "running"
+                        activity.waiting_reason = None
+                    if prerequisite_outcome != dependency.outcome:
                         now = datetime.now(UTC)
                         failed = StageResult(stage_settings.name, "failed", now, now)
                         stages.append(failed)
                         self._complete_stage_future(batch_results, lane, failed.name, "failed")
-                        await self._publish_stage_update(client, run_id, index, failed.name, "failed")
+                        await self._publish_stage_update(client, lane, run_id, index, failed.name, "failed")
                         for remaining_index, remaining in enumerate(run_stages[index + 1:], index + 1):
                             self._complete_stage_future(batch_results, lane, remaining.name, "aborted")
-                            await self._publish_stage_update(client, run_id, remaining_index, remaining.name, "aborted")
+                            await self._publish_stage_update(client, lane, run_id, remaining_index, remaining.name, "aborted")
                         result = TestResult(run_id, dut_id, "failed", self._runtime_config_revision, started_at, now, tuple(stages))
                         await logger.log("error", f"dependency {dependency.lane}.{dependency.stage} did not reach {dependency.outcome}")
-                        await self._publish_result(client, result)
+                        await self._publish_result(client, result, lane)
                         return result
-                await self._publish_stage_update(client, run_id, index, stage_settings.name, "running")
+                if activity is not None:
+                    activity.status = "running"
+                    activity.current_stage = stage_settings.name
+                    activity.waiting_reason = None
+                await self._publish_stage_update(client, lane, run_id, index, stage_settings.name, "running")
                 stage_logger = StageScopedLogger(
                     logger,
                     stage_settings.name,
@@ -362,9 +409,18 @@ class BasicStation:
                 await stage_logger.start()
                 stage_started_at = datetime.now(UTC)
                 try:
-                    locks = [self._stage_locks.setdefault(name, asyncio.Lock()) for name in sorted(stage_settings.locks)]
-                    for lock in locks:
+                    lock_names = sorted(stage_settings.locks)
+                    locks = [self._stage_locks.setdefault(name, asyncio.Lock()) for name in lock_names]
+                    for lock_name, lock in zip(lock_names, locks, strict=True):
+                        if lock.locked():
+                            if activity is not None:
+                                activity.status = "blocked"
+                                activity.waiting_reason = f"Waiting for resource lock {lock_name}"
+                            await self._publish_stage_update(client, lane, run_id, index, stage_settings.name, "blocked")
                         await lock.acquire()
+                    if activity is not None:
+                        activity.status = "running"
+                        activity.waiting_reason = None
                     try:
                         stage_result = await create_stage(stage_settings, self._stage_factories).run(stage_logger, run_context)
                     finally:
@@ -381,10 +437,10 @@ class BasicStation:
                     )
                     stages.append(stage_result)
                     self._complete_stage_future(batch_results, lane, stage_result.name, stage_result.outcome)
-                    await self._publish_stage_update(client, run_id, index, stage_result.name, stage_result.outcome)
+                    await self._publish_stage_update(client, lane, run_id, index, stage_result.name, stage_result.outcome)
                     for remaining_index, remaining in enumerate(run_stages[index + 1:], index + 1):
                         self._complete_stage_future(batch_results, lane, remaining.name, "aborted")
-                        await self._publish_stage_update(client, run_id, remaining_index, remaining.name, "aborted")
+                        await self._publish_stage_update(client, lane, run_id, remaining_index, remaining.name, "aborted")
                     result = TestResult(
                         run_id=run_id,
                         dut_id=dut_id,
@@ -395,12 +451,12 @@ class BasicStation:
                         stages=tuple(stages),
                     )
                     await logger.log("warning", f"basic test aborted for DUT {dut_id}")
-                    await self._publish_result(client, result)
+                    await self._publish_result(client, result, lane)
                     log.info("basic_test.finished", dut_id=dut_id, outcome="aborted")
                     return result
                 stages.append(stage_result)
                 self._complete_stage_future(batch_results, lane, stage_result.name, stage_result.outcome)
-                await self._publish_stage_update(client, run_id, index, stage_result.name, stage_result.outcome)
+                await self._publish_stage_update(client, lane, run_id, index, stage_result.name, stage_result.outcome)
 
             outcome = "passed" if all(stage.outcome == "passed" for stage in stages) else "failed"
 
@@ -415,7 +471,7 @@ class BasicStation:
                 stages=tuple(stages),
             )
             await logger.log("info", f"basic test {outcome} for DUT {dut_id}")
-            await self._publish_result(client, result)
+            await self._publish_result(client, result, lane)
             log.info("basic_test.finished", dut_id=dut_id, outcome=outcome)
             return result
         finally:
@@ -457,11 +513,14 @@ class BasicStation:
         return plan
 
     @staticmethod
-    def _active_run_state(active_runs: Mapping[str, asyncio.Task[TestResult]]) -> tuple[str, str | None]:
+    def _active_run_state(
+        active_runs: Mapping[str, asyncio.Task[TestResult]],
+        active_lanes: Mapping[str, _LaneActivity],
+    ) -> tuple[str, str | None, tuple[_LaneActivity, ...]]:
         for task in active_runs.values():
             if not task.done():
-                return "running", _task_run_id(task)
-        return "idle", None
+                return "running", _task_run_id(task), tuple(active_lanes.values())
+        return "idle", None, ()
 
     @staticmethod
     def _find_active_run_by_id(
@@ -505,28 +564,46 @@ class BasicStation:
 
         return command
 
-    async def _publish_heartbeat(self, client: _Publisher, status: str, run_id: str | None = None) -> None:
+    async def _publish_heartbeat(
+        self,
+        client: _Publisher,
+        status: str,
+        run_id: str | None = None,
+        active_lanes: Sequence[_LaneActivity] | None = None,
+    ) -> None:
         payload = Heartbeat(
             ts=datetime.now(UTC),
             status=status,
             currentRunId=run_id,
+            activeLanes=[
+                HeartbeatActiveLanesItem(
+                    lane=activity.lane,
+                    runId=activity.run_id,
+                    dutId=activity.dut_id,
+                    status=activity.status,
+                    currentStage=activity.current_stage,
+                    waitingReason=activity.waiting_reason,
+                )
+                for activity in active_lanes
+            ] if active_lanes else None,
         ).model_dump_json(by_alias=True)
         await client.publish(f"{self._settings.topic_prefix}/heartbeat", payload=payload, qos=1)
 
     async def _serve_heartbeat_loop(
         self,
         client: _Publisher,
-        get_state: Callable[[], tuple[str, str | None]],
+        get_state: Callable[[], tuple[str, str | None, Sequence[_LaneActivity]]],
         interval_s: float = 5.0,
     ) -> None:
         while True:
-            status, run_id = get_state()
-            await self._publish_heartbeat(client, status, run_id=run_id)
+            status, run_id, active_lanes = get_state()
+            await self._publish_heartbeat(client, status, run_id=run_id, active_lanes=active_lanes)
             await asyncio.sleep(interval_s)
 
     async def _publish_stage_update(
         self,
         client: _Publisher,
+        lane: str,
         run_id: str | None,
         index: int,
         name: str,
@@ -535,16 +612,18 @@ class BasicStation:
         payload = Stage(
             ts=datetime.now(UTC),
             runId=run_id,
+            lane=lane,
             index=index,
             name=name,
             status=status,
         ).model_dump_json(by_alias=True)
         await client.publish(f"{self._settings.topic_prefix}/stage", payload=payload, qos=1)
 
-    async def _publish_result(self, client: _Publisher, result: TestResult) -> None:
+    async def _publish_result(self, client: _Publisher, result: TestResult, lane: str) -> None:
         payload = MqttTestResult(
             ts=result.finished_at,
             runId=result.run_id,
+            lane=lane,
             dutId=result.dut_id,
             outcome=result.outcome,
             configRevision=result.config_revision,

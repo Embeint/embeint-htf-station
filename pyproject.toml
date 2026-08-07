@@ -1,6 +1,6 @@
 [project]
 name = "embeint-htf-station"
-version = "0.1.0"
+version = "0.2.0"
 description = "Extensible Python runtime for Embeint hardware test stations"
 readme = "README.md"
 license = "Apache-2.0"
