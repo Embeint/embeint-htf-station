@@ -1,0 +1,88 @@
+# Reference configuration for a two-programmer Infuse programming jig.
+#
+# Set HTF_ORG_ID and HTF_STATION_ID before starting the station. Replace the
+# programmer serial numbers and firmware IDs with the values for this jig.
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+
+plugins: [infuse]
+
+programmers:
+  - name: jlink_left
+    kind: jlink
+    serial_number: 823000667
+    target_device: nrf54l15_m33
+    board: kudu
+    rtt_channel: 0
+    rtt_telnet_port: 19021
+  - name: jlink_right
+    kind: jlink
+    serial_number: 823000668
+    target_device: nrf54l15_m33
+    board: kudu
+    rtt_channel: 0
+    rtt_telnet_port: 19022
+
+lanes:
+  - name: left
+    programmer: jlink_left
+  - name: right
+    programmer: jlink_right
+
+plans:
+  - lane: left
+    stages:
+      - name: Left device erase
+        kind: nrfutil_device_recover
+      - name: Left flash validation firmware
+        kind: firmware_flash
+        firmware_id: replace-with-validation-firmware-id
+        firmware_version: latest
+        path: zephyr/zephyr.hex
+      - name: Left provisioning
+        kind: infuse_provisioning
+        board_pool: kudu
+        locks: [infuse_api, board_pool:kudu]
+      - name: Left validation
+        kind: infuse_validation_rtt
+        reset_before_capture: true
+        number_of_tests: 10
+        test_timeout_seconds: 60
+        tests: [BT, MODEM, DISK, FLASH, LED, IMU]
+      - name: Left flash release firmware
+        kind: firmware_flash
+        firmware_id: replace-with-release-firmware-id
+        firmware_version: latest
+        path: zephyr/zephyr.hex
+
+  - lane: right
+    stages:
+      - name: Right device erase
+        kind: nrfutil_device_recover
+      - name: Right flash validation firmware
+        kind: firmware_flash
+        firmware_id: replace-with-validation-firmware-id
+        firmware_version: latest
+        path: zephyr/zephyr.hex
+      # Provisioning shares both the Infuse API and board pool with the left
+      # lane. The dependency makes the intended operator sequence explicit.
+      - name: Right provisioning
+        kind: infuse_provisioning
+        board_pool: kudu
+        locks: [infuse_api, board_pool:kudu]
+        after:
+          - lane: left
+            stage: Left provisioning
+            outcome: passed
+      - name: Right validation
+        kind: infuse_validation_rtt
+        reset_before_capture: true
+        number_of_tests: 10
+        test_timeout_seconds: 60
+        tests: [BT, MODEM, DISK, FLASH, LED, IMU]
+      - name: Right flash release firmware
+        kind: firmware_flash
+        firmware_id: replace-with-release-firmware-id
+        firmware_version: latest
+        path: zephyr/zephyr.hex
