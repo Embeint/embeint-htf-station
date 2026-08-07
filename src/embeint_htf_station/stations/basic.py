@@ -584,8 +584,8 @@ class BasicStation:
                     currentStage=activity.current_stage,
                     waitingReason=activity.waiting_reason,
                 )
-                for activity in active_lanes
-            ] if active_lanes else None,
+                for activity in active_lanes or ()
+            ],
         ).model_dump_json(by_alias=True)
         await client.publish(f"{self._settings.topic_prefix}/heartbeat", payload=payload, qos=1)
 

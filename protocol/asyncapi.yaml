@@ -105,7 +105,7 @@ components:
   schemas:
     Heartbeat:
       type: object
-      required: [ts, status]
+      required: [ts, status, activeLanes]
       properties:
         ts:
           type: string
@@ -119,7 +119,7 @@ components:
           nullable: true
         activeLanes:
           type: array
-          description: Active lane state. Omitted by legacy single-lane stations.
+          description: Authoritative active lane state. Empty when the station is idle.
           items:
             type: object
             required: [lane, status]
@@ -145,7 +145,7 @@ components:
 
     LogBatch:
       type: object
-      required: [ts, entries]
+      required: [ts, lane, entries]
       properties:
         ts:
           type: string
@@ -156,7 +156,6 @@ components:
           nullable: true
         lane:
           type: string
-          nullable: true
         entries:
           type: array
           items:
@@ -174,7 +173,7 @@ components:
 
     TestResult:
       type: object
-      required: [ts, dutId, outcome, startedAt, finishedAt]
+      required: [ts, lane, dutId, outcome, startedAt, finishedAt]
       properties:
         ts:
           type: string
@@ -185,7 +184,6 @@ components:
           nullable: true
         lane:
           type: string
-          nullable: true
         dutId:
           type: string
         outcome:
@@ -220,7 +218,7 @@ components:
 
     Stage:
       type: object
-      required: [ts, index, name, status]
+      required: [ts, lane, index, name, status]
       properties:
         ts:
           type: string
@@ -231,7 +229,6 @@ components:
           nullable: true
         lane:
           type: string
-          nullable: true
         index:
           type: integer
         name:
