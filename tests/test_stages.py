@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from embeint_htf_station.config import LanePlanSettings, LaneSettings, Settings, StageSettings
+from embeint_htf_station.config import LanePlanSettings, LaneSettings, ProgrammerSettings, Settings, StageSettings
 from embeint_htf_station.stages import StageContext, create_stage
 from embeint_htf_station.stages.hardware_id import HardwareIdStage
 from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage
 from embeint_htf_station.stages.infuse_validation import InfuseValidationStage
 from embeint_htf_station.stages.print_stage import PrintStage
+from embeint_htf_station.stages.simulated_programmer import SimulatedProgrammerStage
 from embeint_htf_station.stations.basic import BasicStation
 
 
@@ -78,6 +79,18 @@ def test_basic_station_registers_hardware_id_stage() -> None:
     settings = StageSettings(name="Get Hardware ID", kind="hardware_id")
 
     assert isinstance(create_stage(settings, station._stage_factories), HardwareIdStage)
+
+
+async def test_simulated_programmer_stage_uses_a_simulated_programmer() -> None:
+    settings = StageSettings(name="Simulated flash", kind="simulated_programmer", programmer="left", wait_seconds=0)
+    stage = SimulatedProgrammerStage(settings, {"left": ProgrammerSettings(name="left", kind="simulated")})
+    logger, context = FakeLogger(), StageContext(dut_id="DUT-001")
+
+    result = await stage.run(logger, context)
+
+    assert result.outcome == "passed"
+    assert context.get_output_value("left_simulated") == "passed"
+    assert ("info", "simulated programmer left: testing") in logger.entries
 
 
 def test_basic_station_uses_default_plan_for_single_lane_command() -> None:

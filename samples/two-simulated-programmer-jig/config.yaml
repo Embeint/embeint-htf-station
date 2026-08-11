@@ -1,0 +1,60 @@
+# Two simulated programmers working on the same DUT through independent lanes.
+#
+# The station IDs come from the local HTF server. The configuration can run
+# without the API key, but setting HTF_API_KEY also lets the station load the
+# server-owned copy of this plan.
+mqtt:
+  host: ${HTF_MQTT_HOST:-127.0.0.1}
+  port: ${HTF_MQTT_PORT:-1883}
+server:
+  api_base_url: ${HTF_API_BASE_URL:-http://127.0.0.1:5080}
+  station_key: ${HTF_API_KEY}
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}
+
+programmers:
+  - name: ble_programmer
+    kind: simulated
+  - name: cellular_programmer
+    kind: simulated
+
+lanes:
+  - name: ble
+    programmer: ble_programmer
+  - name: cellular
+    programmer: cellular_programmer
+
+plans:
+  - lane: ble
+    stages:
+      - name: Erase BLE application
+        kind: simulated_programmer
+        message: erasing BLE application slot
+        wait_seconds: 1
+      - name: Flash BLE production application
+        kind: simulated_programmer
+        message: flashing BLE production application
+        wait_seconds: 3
+  - lane: cellular
+    stages:
+      - name: Erase cellular modem firmware
+        kind: simulated_programmer
+        message: erasing cellular modem firmware slot
+        wait_seconds: 1
+      - name: Flash cellular modem firmware
+        kind: simulated_programmer
+        message: flashing cellular modem firmware
+        wait_seconds: 3
+      - name: Erase cellular validation firmware
+        kind: simulated_programmer
+        message: erasing cellular validation firmware slot
+        wait_seconds: 1
+        after:
+          - lane: ble
+            stage: Flash BLE production application
+            outcome: passed
+      - name: Flash cellular validation firmware
+        kind: simulated_programmer
+        message: flashing cellular validation firmware
+        wait_seconds: 2

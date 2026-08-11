@@ -92,6 +92,18 @@ async def test_dependency_failure_finishes_only_dependent_lane_and_aborts_remain
     assert any(message[1].get("status") == "aborted" for message in publisher.messages if message[0].endswith("/stage"))
 
 
+async def test_non_batch_run_ignores_cross_lane_dependencies() -> None:
+    station, publisher = make_station(), Publisher()
+    dependent = (StageSettings(name="dependent", kind="probe", after=(
+        StageDependencySettings(lane="left", stage="left flash", outcome="passed"),
+    )),)
+
+    result = await station._run_test(publisher, "R", str(uuid4()), stages=dependent, lane="right")
+
+    assert result.outcome == "passed"
+    assert ProbeStage.completed == ["dependent"]
+
+
 async def test_invalid_batch_entry_publishes_terminal_error_result() -> None:
     station, publisher = make_station(), Publisher()
     queues = {lane: asyncio.Queue() for lane in station._plans}
@@ -111,3 +123,29 @@ async def test_abort_removes_queued_run_and_publishes_terminal_abort() -> None:
     assert queues["left"].empty()
     result = next(payload for topic, payload in publisher.messages if topic.endswith("/result"))
     assert result["outcome"] == "aborted"
+
+
+async def test_abort_while_waiting_for_a_shared_lock_publishes_terminal_abort() -> None:
+    station, publisher = make_station(), Publisher()
+    held_lock = asyncio.Lock()
+    await held_lock.acquire()
+    station._stage_locks["shared"] = held_lock
+
+    task = asyncio.create_task(
+        station._run_test(publisher, "DUT", str(uuid4()), stages=station._plans["left"].stages, lane="left"),
+    )
+    while not any(
+        payload.get("status") == "blocked"
+        for topic, payload in publisher.messages
+        if topic.endswith("/stage")
+    ):
+        await asyncio.sleep(0)
+
+    task.cancel()
+    result = await task
+
+    assert result.outcome == "aborted"
+    assert held_lock.locked()
+    held_lock.release()
+    terminal = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
+    assert terminal[-1]["outcome"] == "aborted"
