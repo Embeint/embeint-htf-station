@@ -32,6 +32,7 @@ from embeint_htf_station.stages.hardware_id import HardwareIdStage
 from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage
 from embeint_htf_station.stages.infuse_validation import InfuseValidationHook, InfuseValidationStage
 from embeint_htf_station.stages.nrfutil import FirmwareFlashStage, NrfutilDeviceRecoverStage, NrfutilDeviceResetStage
+from embeint_htf_station.stages.simulated_programmer import SimulatedProgrammerStage
 
 log = structlog.get_logger(__name__)
 
@@ -149,6 +150,7 @@ class BasicStation:
             "infuse_validation": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
             "infuse_validation_rtt": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
             "infuse_provisioning": lambda stage: InfuseProvisioningStage(stage, self._programmers, self._settings),
+            "simulated_programmer": lambda stage: SimulatedProgrammerStage(stage, self._programmers),
         })
         if stage_factories:
             self._stage_factories.update(stage_factories)
@@ -355,7 +357,7 @@ class BasicStation:
         stages: Sequence[StageSettings] | None = None,
         lane: str = "default",
         publish_idle_on_finish: bool = True,
-        batch_results: Mapping[tuple[str, str], asyncio.Future[str]] = {},
+        batch_results: Mapping[tuple[str, str], asyncio.Future[str]] | None = None,
         activity: _LaneActivity | None = None,
     ) -> TestResult:
         started_at = datetime.now(UTC)
@@ -371,7 +373,8 @@ class BasicStation:
             run_context = StageContext(dut_id=dut_id, run_id=run_id)
             stages: list[StageResult] = []
             for index, stage_settings in enumerate(run_stages):
-                for dependency in stage_settings.after:
+                dependencies = stage_settings.after if batch_results is not None else ()
+                for dependency in dependencies:
                     prerequisite = batch_results.get((dependency.lane, dependency.stage))
                     if activity is not None:
                         activity.status = "blocked"
@@ -411,20 +414,22 @@ class BasicStation:
                 try:
                     lock_names = sorted(stage_settings.locks)
                     locks = [self._stage_locks.setdefault(name, asyncio.Lock()) for name in lock_names]
-                    for lock_name, lock in zip(lock_names, locks, strict=True):
-                        if lock.locked():
-                            if activity is not None:
-                                activity.status = "blocked"
-                                activity.waiting_reason = f"Waiting for resource lock {lock_name}"
-                            await self._publish_stage_update(client, lane, run_id, index, stage_settings.name, "blocked")
-                        await lock.acquire()
-                    if activity is not None:
-                        activity.status = "running"
-                        activity.waiting_reason = None
+                    acquired_locks: list[asyncio.Lock] = []
                     try:
+                        for lock_name, lock in zip(lock_names, locks, strict=True):
+                            if lock.locked():
+                                if activity is not None:
+                                    activity.status = "blocked"
+                                    activity.waiting_reason = f"Waiting for resource lock {lock_name}"
+                                await self._publish_stage_update(client, lane, run_id, index, stage_settings.name, "blocked")
+                            await lock.acquire()
+                            acquired_locks.append(lock)
+                        if activity is not None:
+                            activity.status = "running"
+                            activity.waiting_reason = None
                         stage_result = await create_stage(stage_settings, self._stage_factories).run(stage_logger, run_context)
                     finally:
-                        for lock in reversed(locks):
+                        for lock in reversed(acquired_locks):
                             lock.release()
                 except asyncio.CancelledError:
                     finished_at = datetime.now(UTC)
@@ -488,8 +493,10 @@ class BasicStation:
 
     @staticmethod
     def _complete_stage_future(
-        results: Mapping[tuple[str, str], asyncio.Future[str]], lane: str, stage: str, outcome: str,
+        results: Mapping[tuple[str, str], asyncio.Future[str]] | None, lane: str, stage: str, outcome: str,
     ) -> None:
+        if results is None:
+            return
         future = results.get((lane, stage))
         if future is not None and not future.done():
             future.set_result(outcome)

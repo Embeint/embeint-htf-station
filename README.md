@@ -61,6 +61,12 @@ HTF_API_KEY=st_api_...
 
 Never reuse these values between stations. MQTT credentials are restricted by the broker to the station's own heartbeat, stage, log, and result topics, plus its command subscription. Rotate a credential in the operator UI after exposure; revoked credentials cannot reconnect or access station APIs.
 
+### MQTT session takeover detection
+
+The broker requires the provisioned MQTT username as the station's MQTT client ID. MQTT permits only one active connection for a client ID, so another connection using the same provisioned credentials will disconnect the active station session. This can be caused by a network or broker fault as well as credential reuse; MQTT does not expose enough information to distinguish them reliably.
+
+An established session that ends unexpectedly emits a `broker.disconnected` warning with `possible_session_takeover=true`. Treat that event as a credential-exposure signal: investigate the broker and network logs, then rotate the station credential in the operator UI when reuse cannot be ruled out.
+
 ## Contract generation
 
 The generated MQTT models are committed to the package. Regenerate them after changing the AsyncAPI contract:

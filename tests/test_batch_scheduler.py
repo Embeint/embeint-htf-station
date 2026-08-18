@@ -31,6 +31,18 @@ class ProbeStage:
         return StageResult(self.settings.name, "passed", now, now)
 
 
+class GatedStage:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    def __init__(self, settings: StageSettings) -> None: self.settings = settings
+    async def run(self, _logger: object, _context: StageContext) -> StageResult:
+        GatedStage.started.set()
+        await GatedStage.release.wait()
+        now = datetime.now(UTC)
+        return StageResult(self.settings.name, "passed", now, now)
+
+
 def make_station() -> BasicStation:
     ProbeStage.active = ProbeStage.max_active = 0
     ProbeStage.completed = []
@@ -40,6 +52,19 @@ def make_station() -> BasicStation:
         LanePlanSettings(lane="left", stages=(StageSettings(name="left flash", kind="probe", locks=("shared",)),)),
         LanePlanSettings(lane="right", stages=(StageSettings(name="right flash", kind="probe", locks=("shared",)),)),
     )), stage_factories={"probe": ProbeStage})
+
+
+async def test_independent_lanes_run_concurrently() -> None:
+    station, publisher = make_station(), Publisher()
+    left = (StageSettings(name="left flash", kind="probe"),)
+    right = (StageSettings(name="right flash", kind="probe"),)
+
+    await asyncio.gather(
+        station._run_test(publisher, "DUT", str(uuid4()), stages=left, lane="left"),
+        station._run_test(publisher, "DUT", str(uuid4()), stages=right, lane="right"),
+    )
+
+    assert ProbeStage.max_active == 2
 
 
 async def test_shared_stage_lock_serializes_concurrent_lanes() -> None:
@@ -55,6 +80,43 @@ async def test_shared_stage_lock_serializes_concurrent_lanes() -> None:
     assert any(payload["status"] == "blocked" for payload in stages)
     results = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
     assert {payload["lane"] for payload in results} == {"left", "right"}
+
+
+async def test_dependent_lane_waits_for_the_prerequisite_stage() -> None:
+    GatedStage.started = asyncio.Event()
+    GatedStage.release = asyncio.Event()
+    ProbeStage.completed = []
+    settings = Settings(org_id=str(uuid4()), station_id=str(uuid4()), lanes=(
+        LaneSettings(name="left", programmer="left"), LaneSettings(name="right", programmer="right"),
+    ), plans=(
+        LanePlanSettings(lane="left", stages=(StageSettings(name="left flash", kind="gate"),)),
+        LanePlanSettings(lane="right", stages=(StageSettings(name="right flash", kind="probe", after=(
+            StageDependencySettings(lane="left", stage="left flash", outcome="passed"),
+        )),)),
+    ))
+    station = BasicStation(settings, stage_factories={"probe": ProbeStage, "gate": GatedStage})
+    publisher = Publisher()
+    results = {
+        ("left", "left flash"): asyncio.get_running_loop().create_future(),
+        ("right", "right flash"): asyncio.get_running_loop().create_future(),
+    }
+
+    left = asyncio.create_task(station._run_test(publisher, "DUT", str(uuid4()), stages=station._plans["left"].stages, lane="left", batch_results=results))
+    await GatedStage.started.wait()
+    right = asyncio.create_task(station._run_test(publisher, "DUT", str(uuid4()), stages=station._plans["right"].stages, lane="right", batch_results=results))
+    while not any(
+        payload["lane"] == "right" and payload["status"] == "blocked"
+        for topic, payload in publisher.messages
+        if topic.endswith("/stage")
+    ):
+        await asyncio.sleep(0)
+
+    assert ProbeStage.completed == []
+    GatedStage.release.set()
+    left_result, right_result = await asyncio.gather(left, right)
+
+    assert (left_result.outcome, right_result.outcome) == ("passed", "passed")
+    assert ProbeStage.completed == ["right flash"]
 
 
 async def test_heartbeat_reports_active_lanes() -> None:
@@ -92,6 +154,18 @@ async def test_dependency_failure_finishes_only_dependent_lane_and_aborts_remain
     assert any(message[1].get("status") == "aborted" for message in publisher.messages if message[0].endswith("/stage"))
 
 
+async def test_non_batch_run_ignores_cross_lane_dependencies() -> None:
+    station, publisher = make_station(), Publisher()
+    dependent = (StageSettings(name="dependent", kind="probe", after=(
+        StageDependencySettings(lane="left", stage="left flash", outcome="passed"),
+    )),)
+
+    result = await station._run_test(publisher, "R", str(uuid4()), stages=dependent, lane="right")
+
+    assert result.outcome == "passed"
+    assert ProbeStage.completed == ["dependent"]
+
+
 async def test_invalid_batch_entry_publishes_terminal_error_result() -> None:
     station, publisher = make_station(), Publisher()
     queues = {lane: asyncio.Queue() for lane in station._plans}
@@ -111,3 +185,29 @@ async def test_abort_removes_queued_run_and_publishes_terminal_abort() -> None:
     assert queues["left"].empty()
     result = next(payload for topic, payload in publisher.messages if topic.endswith("/result"))
     assert result["outcome"] == "aborted"
+
+
+async def test_abort_while_waiting_for_a_shared_lock_publishes_terminal_abort() -> None:
+    station, publisher = make_station(), Publisher()
+    held_lock = asyncio.Lock()
+    await held_lock.acquire()
+    station._stage_locks["shared"] = held_lock
+
+    task = asyncio.create_task(
+        station._run_test(publisher, "DUT", str(uuid4()), stages=station._plans["left"].stages, lane="left"),
+    )
+    while not any(
+        payload.get("status") == "blocked"
+        for topic, payload in publisher.messages
+        if topic.endswith("/stage")
+    ):
+        await asyncio.sleep(0)
+
+    task.cancel()
+    result = await task
+
+    assert result.outcome == "aborted"
+    assert held_lock.locked()
+    held_lock.release()
+    terminal = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
+    assert terminal[-1]["outcome"] == "aborted"
