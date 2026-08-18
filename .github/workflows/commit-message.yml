@@ -1,0 +1,47 @@
+name: Commit message convention
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate every commit in the pull request
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const header = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9][a-z0-9._/-]*\))?: [^\s].+$/;
+            const signoff = /^Signed-off-by: .+ <[^<>\s]+@[^<>\s]+>$/;
+            const failures = [];
+
+            for (const commit of commits) {
+              const lines = commit.commit.message.trimEnd().split(/\r?\n/);
+              const hasBody = lines.slice(2, -1).some(line => line.trim().length > 0);
+              const valid = header.test(lines[0] || "")
+                && lines[1] === ""
+                && hasBody
+                && signoff.test(lines.at(-1) || "");
+
+              if (!valid) failures.push(`${commit.sha.slice(0, 7)}: ${lines[0] || "missing subject"}`);
+            }
+
+            if (failures.length > 0) {
+              core.setFailed([
+                "Each commit must have a Conventional Commit subject, a blank line, a non-empty body, and a final Signed-off-by trailer.",
+                "Expected: <type>(<optional-scope>): <short description>\\n\\n<longer description>\\n\\nSigned-off-by: <author> <email>",
+                ...failures,
+              ].join("\\n"));
+            }
