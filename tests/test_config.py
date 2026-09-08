@@ -8,6 +8,7 @@ from embeint_htf_station.config import (
     load_settings_from_yaml,
     parse_lane_plan_settings,
     parse_lane_settings,
+    parse_runtime_plans_from_yaml_text,
     parse_stage_settings,
 )
 
@@ -378,8 +379,6 @@ def test_parse_lane_plan_settings_rejects_unknown_dependency_stage() -> None:
 
 
 def test_runtime_plan_parser_uses_local_programmers_and_rejects_dependency_cycles() -> None:
-    from embeint_htf_station.config import parse_runtime_plans_from_yaml_text
-
     with pytest.raises(ConfigError, match="cycle"):
         parse_runtime_plans_from_yaml_text("""
 lanes:
@@ -397,6 +396,35 @@ plans:
       - name: flash
         after: [{lane: left, stage: flash}]
 """, (ProgrammerSettings(name="jlink_1", kind="jlink"), ProgrammerSettings(name="jlink_2", kind="jlink")))
+
+
+def test_runtime_plan_parser_accepts_reordered_and_quoted_lane_fields() -> None:
+    programmers = (ProgrammerSettings(name="jlink_1", kind="jlink"),)
+
+    lanes, plans = parse_runtime_plans_from_yaml_text("""
+lanes:
+  - programmer: "jlink_1"
+    name: 'left lane'
+plans:
+  - stages:
+      - kind: print
+        name: "quoted stage"
+    lane: 'left lane'
+""", programmers)
+
+    assert lanes[0].name == "left lane"
+    assert lanes[0].programmer == "jlink_1"
+    assert plans[0].stages[0].name == "quoted stage"
+
+
+def test_runtime_plan_parser_supports_legacy_flat_plans_and_rejects_malformed_yaml() -> None:
+    lanes, plans = parse_runtime_plans_from_yaml_text("stages:\n  - name: legacy\n", ())
+
+    assert lanes == ()
+    assert plans[0].lane == "default"
+    assert plans[0].stages[0].name == "legacy"
+    with pytest.raises(ConfigError, match="could not parse YAML"):
+        parse_runtime_plans_from_yaml_text("lanes: [", ())
 
 
 def test_lane_config_rejects_duplicate_programmer_and_stage_locks() -> None:

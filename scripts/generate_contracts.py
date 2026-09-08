@@ -87,12 +87,15 @@ class CSharpGenerator:
 
         for name in [*self._graph.names, *self._graph.inline_objects]:
             schema = self._graph.inline_objects.get(name, self._graph.schema(name) if name in self._graph.names else {})
-            lines.extend(self._class(name, schema))
+            lines.extend(self._definition(name, schema))
             lines.append("")
 
         return "\n".join(lines).rstrip() + "\n"
 
-    def _class(self, name: str, schema: dict[str, Any]) -> list[str]:
+    def _definition(self, name: str, schema: dict[str, Any]) -> list[str]:
+        if schema.get("enum"):
+            return self._enum(name, schema)
+
         required = set(schema.get("required", []))
         lines = [f"public sealed record {pascal_case(name)}", "{"]
         for prop_name, prop_schema in schema.get("properties", {}).items():
@@ -114,7 +117,27 @@ class CSharpGenerator:
         lines.append("}")
         return lines
 
+    @staticmethod
+    def _enum(name: str, schema: dict[str, Any]) -> list[str]:
+        values = schema["enum"]
+        if not all(isinstance(value, str) for value in values):
+            raise ValueError(f"C# generation only supports string enums: {name}")
+        lines = [
+            f"[JsonConverter(typeof(JsonStringEnumConverter<{pascal_case(name)}>))]",
+            f"public enum {pascal_case(name)}",
+            "{",
+        ]
+        for value in values:
+            lines.extend([
+                f"    [JsonStringEnumMemberName(\"{value}\")]",
+                f"    {pascal_case(value)},",
+            ])
+        lines.append("}")
+        return lines
+
     def _type(self, schema: dict[str, Any], inline_name: str) -> str:
+        if len(schema.get("allOf", [])) == 1:
+            return self._type(schema["allOf"][0], inline_name)
         if "$ref" in schema:
             return pascal_case(self._graph.resolve_ref_name(schema["$ref"]))
 
@@ -126,6 +149,8 @@ class CSharpGenerator:
             return "DateTimeOffset"
         if schema_type == "string":
             return "string"
+        if schema_type == "integer" and fmt == "int64":
+            return "long"
         if schema_type == "integer":
             return "int"
         if schema_type == "number":
@@ -134,6 +159,8 @@ class CSharpGenerator:
             return "bool"
         if schema_type == "array":
             return f"IReadOnlyList<{self._type(schema['items'], inline_name)}>"
+        if schema_type == "object" and isinstance(schema.get("additionalProperties"), dict):
+            return f"IReadOnlyDictionary<string, {self._type(schema['additionalProperties'], inline_name)}>"
         if schema_type == "object" and schema.get("additionalProperties"):
             return "IReadOnlyDictionary<string, object?>"
         if schema_type == "object":
@@ -157,7 +184,7 @@ class PythonGenerator:
         body: list[str] = []
         for name in [*self._graph.inline_objects, *self._graph.names]:
             schema = self._graph.inline_objects.get(name, self._graph.schema(name) if name in self._graph.names else {})
-            body.extend(self._class(name, schema))
+            body.extend(self._definition(name, schema))
             body.append("")
 
         return "\n".join([*self._header(), *body]).rstrip() + "\n"
@@ -187,7 +214,12 @@ class PythonGenerator:
         ])
         return lines
 
-    def _class(self, name: str, schema: dict[str, Any]) -> list[str]:
+    def _definition(self, name: str, schema: dict[str, Any]) -> list[str]:
+        enum = schema.get("enum")
+        if enum:
+            self._typing_imports.add("Literal")
+            return [f"{pascal_case(name)} = Literal[{', '.join(repr(item) for item in enum)}]"]
+
         required = set(schema.get("required", []))
         lines = [f"class {pascal_case(name)}(ContractModel):"]
         properties = schema.get("properties", {})
@@ -208,6 +240,8 @@ class PythonGenerator:
         return lines
 
     def _type(self, schema: dict[str, Any], inline_name: str) -> str:
+        if len(schema.get("allOf", [])) == 1:
+            return self._type(schema["allOf"][0], inline_name)
         if "$ref" in schema:
             return pascal_case(self._graph.resolve_ref_name(schema["$ref"]))
 
@@ -234,6 +268,8 @@ class PythonGenerator:
             return "bool"
         if schema_type == "array":
             return f"list[{self._type(schema['items'], inline_name)}]"
+        if schema_type == "object" and isinstance(schema.get("additionalProperties"), dict):
+            return f"dict[str, {self._type(schema['additionalProperties'], inline_name)}]"
         if schema_type == "object" and schema.get("additionalProperties"):
             self._typing_imports.add("Any")
             return "dict[str, Any]"
