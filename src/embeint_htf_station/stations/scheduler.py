@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from uuid import UUID
 
 import structlog
 
@@ -23,6 +24,7 @@ class QueuedRun:
     dut_id: str
     plan: RunPlan
     batch_results: Mapping[tuple[str, str], asyncio.Future[str]]
+    command_id: UUID | None = None
 
 
 @dataclass
@@ -43,6 +45,7 @@ class ActiveRun:
 
 RunTest = Callable[..., Awaitable[object]]
 PublishAborted = Callable[[object, str | None, str, str], Awaitable[None]]
+RunCompleted = Callable[[QueuedRun], None]
 
 
 class LaneScheduler:
@@ -52,6 +55,7 @@ class LaneScheduler:
         plans: Mapping[str, RunPlan],
         run_test: RunTest,
         publish_aborted: PublishAborted,
+        run_completed: RunCompleted | None = None,
     ) -> None:
         self.queues: dict[str, asyncio.Queue[QueuedRun]] = {
             lane: asyncio.Queue() for lane in plans
@@ -61,6 +65,7 @@ class LaneScheduler:
         self._client = client
         self._run_test = run_test
         self._publish_aborted = publish_aborted
+        self._run_completed = run_completed
         self._workers: dict[str, asyncio.Task[None]] = {}
 
     def start(self) -> None:
@@ -96,7 +101,13 @@ class LaneScheduler:
         if active is not None:
             active.cancel()
             return True
-        return await abort_queued_run(self._client, self.queues, run_id, self._publish_aborted)
+        return await abort_queued_run(
+            self._client,
+            self.queues,
+            run_id,
+            self._publish_aborted,
+            self._run_completed,
+        )
 
     async def _worker(self, lane: str, queue: asyncio.Queue[QueuedRun]) -> None:
         await run_lane_worker(
@@ -107,6 +118,7 @@ class LaneScheduler:
             self.active_lanes,
             self._run_test,
             self._publish_aborted,
+            self._run_completed,
         )
 
 
@@ -118,6 +130,7 @@ async def run_lane_worker(
     active_lanes: dict[str, LaneActivity],
     run_test: RunTest,
     publish_aborted: PublishAborted,
+    run_completed: RunCompleted | None = None,
 ) -> None:
     while True:
         queued = await queue.get()
@@ -139,10 +152,14 @@ async def run_lane_worker(
             result = await task
             outcome = getattr(result, "outcome", "error")
             complete_run_future(queued, outcome)
+            if run_completed is not None:
+                run_completed(queued)
         except asyncio.CancelledError:
             complete_run_futures(queued, "aborted")
             if task.cancelled():
                 await publish_aborted(client, queued.run_id, queued.dut_id, lane)
+                if run_completed is not None:
+                    run_completed(queued)
             if asyncio.current_task() is not None and asyncio.current_task().cancelling():
                 raise
         except Exception:
@@ -163,6 +180,7 @@ async def abort_queued_run(
     queues: Mapping[str, asyncio.Queue[QueuedRun]],
     run_id: object,
     publish_aborted: PublishAborted,
+    run_completed: RunCompleted | None = None,
 ) -> bool:
     if not isinstance(run_id, str):
         return False
@@ -181,6 +199,8 @@ async def abort_queued_run(
         if aborted is not None:
             await publish_aborted(client, aborted.run_id, aborted.dut_id, aborted.plan.lane)
             complete_run_futures(aborted, "aborted")
+            if run_completed is not None:
+                run_completed(aborted)
             return True
     return False
 
