@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from embeint_htf_station.config import ProgrammerSettings, StageSettings
+from embeint_htf_station.stages import StageContext
 from embeint_htf_station.stages.infuse_validation import (
     InfuseValidationError,
     InfuseValidationStage,
@@ -12,6 +16,33 @@ from embeint_htf_station.stages.infuse_validation import (
     _validate_infuse_state,
     parse_infuse_line,
 )
+
+
+class FakeTransport:
+    def __init__(self, lines: list[str], *, delay: float = 0) -> None:
+        self._lines = lines
+        self._delay = delay
+        self.exited = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.exited = True
+
+    async def lines(self) -> AsyncIterator[str]:
+        for line in self._lines:
+            if self._delay:
+                await asyncio.sleep(self._delay)
+            yield line
+
+
+@dataclass
+class Logger:
+    entries: list[tuple[str, str]] = field(default_factory=list)
+
+    async def log(self, level: str, message: str) -> None:
+        self.entries.append((level, message))
 
 
 def test_parse_infuse_validation_output_from_sample() -> None:
@@ -116,3 +147,44 @@ def test_infuse_sys_pass_completion_reports_pass_count() -> None:
         kind="infuse_validation",
         tests=("BT",),
     ))
+
+
+async def test_validation_stage_passes_complete_transport_output_and_cleans_up() -> None:
+    transport = FakeTransport([
+        "000077:BT:PASS:PASSED",
+        "000078:SYS:SUCCESS:Complete with 1/1 passed",
+    ])
+    stage = InfuseValidationStage(
+        StageSettings(name="Validation", tests=("BT",), number_of_tests=1),
+        {},
+        transport=transport,
+    )
+
+    result = await stage.run(Logger(), StageContext("DUT"))
+
+    assert result.outcome == "passed"
+    assert transport.exited is True
+
+
+async def test_validation_stage_fails_malformed_output_and_cleans_up() -> None:
+    transport = FakeTransport(["not an infuse validation line"])
+    stage = InfuseValidationStage(StageSettings(name="Validation"), {}, transport=transport)
+
+    result = await stage.run(Logger(), StageContext("DUT"))
+
+    assert result.outcome == "failed"
+    assert transport.exited is True
+
+
+async def test_validation_stage_times_out_and_cleans_up() -> None:
+    transport = FakeTransport(["not complete"], delay=0.05)
+    stage = InfuseValidationStage(
+        StageSettings(name="Validation", test_timeout_seconds=0.001),
+        {},
+        transport=transport,
+    )
+
+    result = await stage.run(Logger(), StageContext("DUT"))
+
+    assert result.outcome == "failed"
+    assert transport.exited is True

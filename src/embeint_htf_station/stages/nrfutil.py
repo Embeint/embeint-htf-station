@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 
 from embeint_htf_station.config import ProgrammerSettings, StageSettings
@@ -13,10 +13,19 @@ class NrfutilError(RuntimeError):
     """Raised when an nrfutil stage is not configured correctly."""
 
 
+CommandRunner = Callable[[Sequence[str], StageLogger], Awaitable[None]]
+
+
 class NrfutilDeviceRecoverStage:
-    def __init__(self, settings: StageSettings, programmers: Mapping[str, ProgrammerSettings]) -> None:
+    def __init__(
+        self,
+        settings: StageSettings,
+        programmers: Mapping[str, ProgrammerSettings],
+        command_runner: CommandRunner | None = None,
+    ) -> None:
         self._settings = settings
         self._programmers = programmers
+        self._command_runner = command_runner or _run_command
 
     async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
@@ -25,7 +34,7 @@ class NrfutilDeviceRecoverStage:
         try:
             programmer = _resolve_programmer(self._settings, self._programmers)
             await logger.log("info", _describe_programmer(programmer))
-            await _run_command(_nrfutil_device_command(("recover",), programmer), logger)
+            await self._command_runner(_nrfutil_device_command(("recover",), programmer), logger)
             outcome = "passed"
             await logger.log("info", "stage passed")
         except (NrfutilError, OSError) as exc:
@@ -41,9 +50,15 @@ class NrfutilDeviceRecoverStage:
 
 
 class NrfutilDeviceResetStage:
-    def __init__(self, settings: StageSettings, programmers: Mapping[str, ProgrammerSettings]) -> None:
+    def __init__(
+        self,
+        settings: StageSettings,
+        programmers: Mapping[str, ProgrammerSettings],
+        command_runner: CommandRunner | None = None,
+    ) -> None:
         self._settings = settings
         self._programmers = programmers
+        self._command_runner = command_runner or _run_command
 
     async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
@@ -52,7 +67,7 @@ class NrfutilDeviceResetStage:
         try:
             programmer = _resolve_programmer(self._settings, self._programmers)
             await logger.log("info", _describe_programmer(programmer))
-            await _run_command(_nrfutil_device_command(("reset",), programmer), logger)
+            await self._command_runner(_nrfutil_device_command(("reset",), programmer), logger)
             outcome = "passed"
             await logger.log("info", "stage passed")
         except (NrfutilError, OSError) as exc:
@@ -73,10 +88,12 @@ class FirmwareFlashStage:
         settings: StageSettings,
         programmers: Mapping[str, ProgrammerSettings],
         firmware_cache: FirmwareCache,
+        command_runner: CommandRunner | None = None,
     ) -> None:
         self._settings = settings
         self._programmers = programmers
         self._firmware_cache = firmware_cache
+        self._command_runner = command_runner or _run_command
 
     async def run(self, logger: StageLogger, context: StageContext) -> StageResult:
         started_at = datetime.now(UTC)
@@ -97,7 +114,7 @@ class FirmwareFlashStage:
                 path_in_archive,
             )
             await logger.log("info", f"using firmware file {firmware_path}")
-            await _run_command(
+            await self._command_runner(
                 _nrfutil_device_command(("program", "--firmware", str(firmware_path)), programmer),
                 logger,
             )

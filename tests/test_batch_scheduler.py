@@ -5,9 +5,11 @@ import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+
 from embeint_htf_station.config import LanePlanSettings, LaneSettings, Settings, StageDependencySettings, StageSettings
 from embeint_htf_station.stages import StageContext, StageResult
-from embeint_htf_station.stations.basic import BasicStation, _LaneActivity, _QueuedRun
+from embeint_htf_station.stations.basic import BasicStation, _LaneActivity, _QueuedRun, _RunPlan
 
 
 class Publisher:
@@ -41,6 +43,12 @@ class GatedStage:
         await GatedStage.release.wait()
         now = datetime.now(UTC)
         return StageResult(self.settings.name, "passed", now, now)
+
+
+class ErrorStage:
+    def __init__(self, settings: StageSettings) -> None: self.settings = settings
+    async def run(self, _logger: object, _context: StageContext) -> StageResult:
+        raise RuntimeError("programmer disconnected")
 
 
 def make_station() -> BasicStation:
@@ -176,15 +184,133 @@ async def test_invalid_batch_entry_publishes_terminal_error_result() -> None:
     assert result["outcome"] == "error"
 
 
-async def test_abort_removes_queued_run_and_publishes_terminal_abort() -> None:
+async def test_batch_revision_mismatch_rejects_every_run_without_queueing() -> None:
+    station, publisher = make_station(), Publisher()
+    station._runtime_config_revision = 7
+    queues = {lane: asyncio.Queue() for lane in station._plans}
+    run_ids = [str(uuid4()), str(uuid4())]
+
+    await station._enqueue_batch(publisher, {
+        "configRevision": 6,
+        "runs": [
+            {"runId": run_ids[0], "lane": "left", "dutId": "LEFT"},
+            {"runId": run_ids[1], "lane": "right", "dutId": "RIGHT"},
+        ],
+    }, queues)
+
+    assert all(queue.empty() for queue in queues.values())
+    results = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
+    assert {result["runId"] for result in results} == set(run_ids)
+    assert {result["outcome"] for result in results} == {"error"}
+    logs = [payload for topic, payload in publisher.messages if topic.endswith("/log")]
+    assert any("revision mismatch" in entry["msg"] for batch in logs for entry in batch["entries"])
+
+
+@pytest.mark.parametrize("aborted_index", [0, 1, 2])
+async def test_abort_removes_first_middle_or_last_queued_run_without_reordering_others(aborted_index: int) -> None:
     station, publisher = make_station(), Publisher()
     queues = {lane: asyncio.Queue() for lane in station._plans}
-    run_id = str(uuid4())
-    await queues["left"].put(_QueuedRun(run_id, "DUT", station._plans["left"], {}))
-    await station._abort_queued_run(publisher, queues, run_id)
-    assert queues["left"].empty()
+    run_ids = [str(uuid4()) for _ in range(3)]
+    for run_id in run_ids:
+        await queues["left"].put(_QueuedRun(run_id, "DUT", station._plans["left"], {}))
+
+    await station._abort_queued_run(publisher, queues, run_ids[aborted_index])
+
+    retained = [queues["left"].get_nowait().run_id for _ in range(2)]
+    assert retained == [run_id for index, run_id in enumerate(run_ids) if index != aborted_index]
     result = next(payload for topic, payload in publisher.messages if topic.endswith("/result"))
+    assert result["runId"] == run_ids[aborted_index]
     assert result["outcome"] == "aborted"
+
+
+async def test_abort_queued_prerequisite_resolves_its_stage_futures() -> None:
+    station, publisher = make_station(), Publisher()
+    run_id = str(uuid4())
+    queue: asyncio.Queue[_QueuedRun] = asyncio.Queue()
+    stage_future = asyncio.get_running_loop().create_future()
+    run_future = asyncio.get_running_loop().create_future()
+    queued = _QueuedRun(
+        run_id,
+        "DUT",
+        station._plans["left"],
+        {("left", "left flash"): stage_future, ("left", "__run__"): run_future},
+    )
+    await queue.put(queued)
+
+    await station._abort_queued_run(publisher, {"left": queue}, run_id)
+
+    assert stage_future.result() == "aborted"
+    assert run_future.result() == "aborted"
+
+
+async def test_cancelling_dependency_wait_preserves_future_for_other_consumers() -> None:
+    station, publisher = make_station(), Publisher()
+    cancelled_run_id, survivor_run_id = str(uuid4()), str(uuid4())
+    dependency = asyncio.get_running_loop().create_future()
+    dependent_stages = (StageSettings(name="dependent", kind="probe", after=(
+        StageDependencySettings(lane="left", stage="left flash", outcome="passed"),
+    )),)
+    batch_results = {("left", "left flash"): dependency}
+    cancelled = asyncio.create_task(station._run_test(
+        publisher,
+        "DUT-1",
+        cancelled_run_id,
+        stages=dependent_stages,
+        lane="right",
+        batch_results=batch_results,
+    ))
+    survivor = asyncio.create_task(station._run_test(
+        publisher,
+        "DUT-2",
+        survivor_run_id,
+        stages=dependent_stages,
+        lane="right",
+        batch_results=batch_results,
+    ))
+    while sum(
+        payload.get("status") == "blocked"
+        for topic, payload in publisher.messages
+        if topic.endswith("/stage")
+    ) < 2:
+        await asyncio.sleep(0)
+
+    cancelled.cancel()
+    cancelled_result = await cancelled
+    assert cancelled_result.outcome == "aborted"
+    assert not dependency.cancelled()
+
+    dependency.set_result("passed")
+    survivor_result = await asyncio.wait_for(survivor, timeout=1)
+    assert survivor_result.outcome == "passed"
+
+
+async def test_lane_worker_executes_next_run_after_cancelling_dependency_wait() -> None:
+    station, publisher = make_station(), Publisher()
+    waiting_run_id, next_run_id = str(uuid4()), str(uuid4())
+    dependency = asyncio.get_running_loop().create_future()
+    waiting_plan = _RunPlan("left", (StageSettings(name="waiting", kind="probe", after=(
+        StageDependencySettings(lane="right", stage="right flash", outcome="passed"),
+    )),))
+    next_plan = _RunPlan("left", (StageSettings(name="next", kind="probe"),))
+    queue: asyncio.Queue[_QueuedRun] = asyncio.Queue()
+    active_runs = {}
+    active_lanes = {}
+    worker = asyncio.create_task(station._lane_worker(publisher, "left", queue, active_runs, active_lanes))
+    await queue.put(_QueuedRun(waiting_run_id, "DUT-1", waiting_plan, {("right", "right flash"): dependency}))
+    await queue.put(_QueuedRun(next_run_id, "DUT-2", next_plan, {}))
+    while station._find_active_run_by_id(active_runs, waiting_run_id) is None:
+        await asyncio.sleep(0)
+
+    station._find_active_run_by_id(active_runs, waiting_run_id).cancel()  # type: ignore[union-attr]
+    await asyncio.wait_for(queue.join(), timeout=1)
+
+    worker.cancel()
+    await asyncio.gather(worker, return_exceptions=True)
+    results = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
+    assert [(result["runId"], result["outcome"]) for result in results] == [
+        (waiting_run_id, "aborted"),
+        (next_run_id, "passed"),
+    ]
 
 
 async def test_abort_while_waiting_for_a_shared_lock_publishes_terminal_abort() -> None:
@@ -211,3 +337,24 @@ async def test_abort_while_waiting_for_a_shared_lock_publishes_terminal_abort() 
     held_lock.release()
     terminal = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
     assert terminal[-1]["outcome"] == "aborted"
+
+
+async def test_unexpected_stage_failure_publishes_terminal_error_and_resolves_stage_future() -> None:
+    station, publisher = make_station(), Publisher()
+    station._stage_factories["error"] = ErrorStage
+    stage = StageSettings(name="Flash", kind="error")
+    future = asyncio.get_running_loop().create_future()
+
+    result = await station._run_test(
+        publisher,
+        "DUT",
+        str(uuid4()),
+        stages=(stage,),
+        lane="left",
+        batch_results={("left", "Flash"): future},
+    )
+
+    assert result.outcome == "error"
+    assert future.result() == "error"
+    terminal = [payload for topic, payload in publisher.messages if topic.endswith("/result")]
+    assert terminal[-1]["outcome"] == "error"
