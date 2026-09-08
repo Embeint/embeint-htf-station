@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import UUID
 
 import structlog
 
@@ -105,10 +106,17 @@ class BasicStation:
     async def serve_forever(self) -> None:
         await self._load_runtime_configuration()
         async with connect(self._settings) as client:
+            await self._recover_interrupted_commands(client)
             await client.subscribe(f"{self._settings.topic_prefix}/cmd", qos=1)
             log.info("basic_station.subscribed", topic=f"{self._settings.topic_prefix}/cmd")
 
-            scheduler = LaneScheduler(client, self._plans, self._run_test, self._publish_aborted_without_stages)
+            scheduler = LaneScheduler(
+                client,
+                self._plans,
+                self._run_test,
+                self._publish_aborted_without_stages,
+                self._complete_queued_command,
+            )
             scheduler.start()
             heartbeat_task = asyncio.create_task(
                 self._serve_heartbeat_loop(
@@ -126,7 +134,7 @@ class BasicStation:
                     if not isinstance(payload, dict):
                         log.warning("basic_station.command_missing_payload")
                         continue
-                    if not self._command_receipts.claim(command.id):
+                    if not self._command_receipts.claim(command):
                         log.info("basic_station.command_duplicate", command_id=str(command.id))
                         continue
 
@@ -135,14 +143,18 @@ class BasicStation:
                         if scheduler.find_active(run_id) is not None:
                             log.info("basic_station.abort_requested", run_id=run_id)
                         await scheduler.abort(run_id)
+                        self._command_receipts.complete(command.id)
                         continue
 
                     if command.kind == "run-batch":
-                        await self._enqueue_batch(client, payload, scheduler.queues)
+                        queued = await self._enqueue_batch(client, payload, scheduler.queues, command.id)
+                        if queued == 0:
+                            self._command_receipts.complete(command.id)
                         continue
 
                     if command.kind != "run-plan":
                         log.info("basic_station.command_ignored", kind=command.kind)
+                        self._command_receipts.complete(command.id)
                         continue
 
                     dut_id = payload.get("dutId")
@@ -150,16 +162,25 @@ class BasicStation:
                         log.warning("basic_station.command_missing_dut_id")
                         if isinstance(payload.get("runId"), str):
                             await self._publish_terminal_error(client, payload["runId"], "unknown", "command missing DUT ID")
+                            self._command_receipts.complete_run(command.id, payload["runId"])
+                        else:
+                            self._command_receipts.complete(command.id)
                         continue
 
                     plan = self._run_plan_from_payload(payload)
                     if plan is None:
                         if isinstance(payload.get("runId"), str):
                             await self._publish_terminal_error(client, payload["runId"], dut_id.strip(), "invalid or stale lane command")
+                            self._command_receipts.complete_run(command.id, payload["runId"])
+                        else:
+                            self._command_receipts.complete(command.id)
                         continue
                     run_id = payload.get("runId")
-                    current_run_id = run_id if isinstance(run_id, str) else None
-                    await scheduler.enqueue(_QueuedRun(current_run_id, dut_id.strip(), plan, {}))
+                    if not isinstance(run_id, str) or not run_id.strip():
+                        log.warning("basic_station.command_missing_run_id")
+                        self._command_receipts.complete(command.id)
+                        continue
+                    await scheduler.enqueue(_QueuedRun(run_id, dut_id.strip(), plan, {}, command.id))
             finally:
                 heartbeat_task.cancel()
                 try:
@@ -168,13 +189,39 @@ class BasicStation:
                     pass
                 await scheduler.stop()
 
+    async def _recover_interrupted_commands(self, client: _Publisher) -> None:
+        for receipt in self._command_receipts.incomplete():
+            log.warning(
+                "basic_station.command_interrupted",
+                command_id=str(receipt.command_id),
+                kind=receipt.kind,
+                runs=len(receipt.runs),
+            )
+            for run in receipt.runs:
+                await self._publish_terminal_error(
+                    client,
+                    run.run_id,
+                    run.dut_id,
+                    "station restarted before command completion; hardware execution state is unknown",
+                    run.lane,
+                )
+            self._command_receipts.complete(receipt.command_id)
+
+    def _complete_queued_command(self, queued: _QueuedRun) -> None:
+        if queued.command_id is not None and queued.run_id is not None:
+            self._command_receipts.complete_run(queued.command_id, queued.run_id)
+
     async def _enqueue_batch(
-        self, client: _Publisher, payload: dict[str, object], lane_queues: Mapping[str, asyncio.Queue[_QueuedRun]],
-    ) -> None:
+        self,
+        client: _Publisher,
+        payload: dict[str, object],
+        lane_queues: Mapping[str, asyncio.Queue[_QueuedRun]],
+        command_id: UUID | None = None,
+    ) -> int:
         entries = payload.get("runs")
         if not isinstance(entries, list):
             log.warning("basic_station.batch_invalid", error="runs is required")
-            return
+            return 0
         command_revision = payload.get("configRevision")
         if command_revision != self._runtime_config_revision:
             log.warning(
@@ -194,7 +241,9 @@ class BasicStation:
                         f"configuration revision mismatch: command={command_revision}, loaded={self._runtime_config_revision}",
                         lane if isinstance(lane, str) else "default",
                     )
-            return
+                    if command_id is not None:
+                        self._command_receipts.complete_run(command_id, run_id)
+            return 0
         futures: dict[tuple[str, str], asyncio.Future[str]] = {}
         parsed: list[tuple[str, str, str]] = []
         for item in entries:
@@ -204,16 +253,21 @@ class BasicStation:
             if not all(isinstance(value, str) and value.strip() for value in (run_id, lane, dut_id)) or lane not in self._plans:
                 if isinstance(run_id, str) and isinstance(dut_id, str):
                     await self._publish_terminal_error(client, run_id, dut_id, "invalid batch lane or DUT")
+                    if command_id is not None:
+                        self._command_receipts.complete_run(command_id, run_id)
                 continue
             if (lane, "__run__") in futures:
                 await self._publish_terminal_error(client, run_id, dut_id, "duplicate lane in batch")
+                if command_id is not None:
+                    self._command_receipts.complete_run(command_id, run_id)
                 continue
             futures[(lane, "__run__")] = asyncio.get_running_loop().create_future()
             for stage in self._plans[lane].stages:
                 futures[(lane, stage.name)] = asyncio.get_running_loop().create_future()
             parsed.append((run_id, lane, dut_id))
         for run_id, lane, dut_id in parsed:
-            await lane_queues[lane].put(_QueuedRun(run_id, dut_id, self._plans[lane], futures))
+            await lane_queues[lane].put(_QueuedRun(run_id, dut_id, self._plans[lane], futures, command_id))
+        return len(parsed)
 
     async def _lane_worker(
         self,
