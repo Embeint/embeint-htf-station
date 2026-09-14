@@ -1,0 +1,12 @@
+mqtt:
+  transport: mtls
+  host: mqtt.app.embeint-htf.com
+  port: 8883
+  client_cert: ./credentials/client.pem
+  client_key: ./credentials/client.key
+  # ca_cert is optional: the public broker uses a publicly trusted certificate.
+server:
+  api_base_url: https://app.embeint-htf.com
+station:
+  org_id: ${HTF_ORG_ID}
+  station_id: ${HTF_STATION_ID}

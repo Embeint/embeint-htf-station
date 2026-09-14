@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -72,12 +72,33 @@ class LanePlanSettings(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="HTF_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="HTF_", env_file=".env", extra="ignore", populate_by_name=True, hide_input_in_errors=True,
+    )
 
-    broker_host: str = "localhost"
-    broker_port: int = 1883
-    broker_username: str | None = None
-    broker_password: str | None = None
+    broker_host: str = Field("localhost", validation_alias=AliasChoices("HTF_MQTT_HOST", "HTF_BROKER_HOST"))
+    broker_port: int = Field(8883, ge=1, le=65535,
+                             validation_alias=AliasChoices("HTF_MQTT_PORT", "HTF_BROKER_PORT"))
+    broker_username: str | None = Field(None,
+        validation_alias=AliasChoices("HTF_MQTT_USERNAME", "HTF_BROKER_USERNAME"))
+    broker_password: str | None = Field(None, repr=False,
+        validation_alias=AliasChoices("HTF_MQTT_PASSWORD", "HTF_BROKER_PASSWORD"))
+    mqtt_transport: Literal["tls", "mtls", "plaintext"] = "tls"
+    mqtt_ca_cert: Path | None = None
+    mqtt_client_cert: Path | None = None
+    mqtt_client_key: Path | None = Field(None, repr=False)
+
+    @model_validator(mode="after")
+    def validate_mqtt_transport(self) -> Self:
+        if bool(self.mqtt_client_cert) != bool(self.mqtt_client_key):
+            raise ValueError("MQTT client_cert and client_key must be configured together")
+        if self.mqtt_transport == "mtls" and not self.mqtt_client_cert:
+            raise ValueError("MQTT mtls requires client_cert and client_key")
+        if self.mqtt_transport == "plaintext" and any((
+            self.mqtt_ca_cert, self.mqtt_client_cert, self.mqtt_client_key,
+        )):
+            raise ValueError("MQTT plaintext cannot be used with TLS certificate paths")
+        return self
 
     api_base_url: str = "http://localhost:5080"
     station_key: str | None = None
@@ -123,9 +144,14 @@ def load_settings_from_yaml(path: Path) -> Settings:
     lanes = parse_lane_settings(data, programmers)
     plans = parse_lane_plan_settings(data, lanes, stages)
 
+    transport = _env_or_config("HTF_MQTT_TRANSPORT", mqtt, "transport", "tls")
     return Settings(
+        mqtt_transport=transport,
+        mqtt_ca_cert=_mqtt_path(path, mqtt, "ca_cert"),
+        mqtt_client_cert=_mqtt_path(path, mqtt, "client_cert"),
+        mqtt_client_key=_mqtt_path(path, mqtt, "client_key"),
         broker_host=_env_or_config("HTF_MQTT_HOST", mqtt, "host", "localhost"),
-        broker_port=int(_env_or_config("HTF_MQTT_PORT", mqtt, "port", 1883)),
+        broker_port=int(_env_or_config("HTF_MQTT_PORT", mqtt, "port", 1883 if transport == "plaintext" else 8883)),
         broker_username=_optional_str(_env_or_config("HTF_MQTT_USERNAME", mqtt, "username")),
         broker_password=_optional_str(_env_or_config("HTF_MQTT_PASSWORD", mqtt, "password")),
         api_base_url=_env_or_config("HTF_API_BASE_URL", server, "api_base_url", "http://localhost:5080"),
@@ -144,6 +170,14 @@ def load_settings_from_yaml(path: Path) -> Settings:
         lanes=lanes,
         plans=plans,
     )
+
+
+def _mqtt_path(config_path: Path, mqtt: dict[str, Any], name: str) -> Path | None:
+    value = _optional_str(_env_or_config(f"HTF_MQTT_{name.upper()}", mqtt, name))
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (config_path.parent / path).resolve()
 
 
 def _parse_simple_yaml(path: Path) -> dict[str, Any]:

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 import aiomqtt
 import structlog
 
-from embeint_htf_station.config import Settings
+from embeint_htf_station.config import ConfigError, Settings
 from embeint_htf_station.contracts.mqtt import Heartbeat
 
 log = structlog.get_logger(__name__)
@@ -41,8 +42,27 @@ def _unexpected_disconnect_context(settings: Settings, error: Exception) -> dict
     }
 
 
+def create_tls_context(settings: Settings) -> ssl.SSLContext | None:
+    """Validate local material before starting MQTT or accepting run commands."""
+    if settings.mqtt_transport == "plaintext":
+        return None
+    try:
+        context = ssl.create_default_context(cafile=settings.mqtt_ca_cert)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        if settings.mqtt_client_cert:
+            # Supplying a callback prevents OpenSSL prompting on unattended stations.
+            context.load_cert_chain(settings.mqtt_client_cert, settings.mqtt_client_key, password=lambda: "")
+        return context
+    except (OSError, ValueError) as error:
+        raise ConfigError(
+            "Cannot load MQTT TLS material: check CA/client PEM files, matching unencrypted "
+            "private key, and file read permissions"
+        ) from error
+
+
 @asynccontextmanager
 async def connect(settings: Settings) -> AsyncIterator[aiomqtt.Client]:
+    tls_context = create_tls_context(settings)
     connected = False
     try:
         async with aiomqtt.Client(
@@ -51,6 +71,7 @@ async def connect(settings: Settings) -> AsyncIterator[aiomqtt.Client]:
             username=settings.broker_username,
             password=settings.broker_password,
             identifier=_client_identifier(settings),
+            tls_context=tls_context,
         ) as client:
             connected = True
             log.info("broker.connected", host=settings.broker_host, port=settings.broker_port)
@@ -58,6 +79,10 @@ async def connect(settings: Settings) -> AsyncIterator[aiomqtt.Client]:
     except aiomqtt.MqttError as error:
         if connected:
             log.warning("broker.disconnected", **_unexpected_disconnect_context(settings, error))
+        else:
+            log.error("broker.connection_failed", host=settings.broker_host, port=settings.broker_port,
+                      transport=settings.mqtt_transport,
+                      diagnostic="Check broker hostname/CA, certificate expiry, client key and MQTT credentials")
         raise
 
 

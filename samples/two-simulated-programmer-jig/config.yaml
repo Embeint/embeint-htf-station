@@ -4,6 +4,7 @@
 # without the API key, but setting HTF_API_KEY also lets the station load the
 # server-owned copy of this plan.
 mqtt:
+  transport: ${HTF_MQTT_TRANSPORT:-plaintext}
   host: ${HTF_MQTT_HOST:-127.0.0.1}
   port: ${HTF_MQTT_PORT:-1883}
 server:

@@ -1,3 +1,7 @@
+mqtt:
+  # Development only; use the production example for external stations.
+  transport: ${HTF_MQTT_TRANSPORT:-plaintext}
+
 # Reference configuration for a two-programmer Infuse programming jig.
 #
 # Set HTF_ORG_ID and HTF_STATION_ID before starting the station. Replace the
