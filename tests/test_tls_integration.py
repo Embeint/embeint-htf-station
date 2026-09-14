@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(os.getenv('HTF_TLS_INTEGRATION') != '1', reason=
 
 
 def command(*args):
-    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
+    return subprocess.check_output(args, text=True).strip()
 
 
 @pytest.fixture(scope='module')
