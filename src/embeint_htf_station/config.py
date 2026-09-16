@@ -214,6 +214,7 @@ def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
         raise ConfigError("Config section 'stages' must be a list")
 
     stages: list[StageSettings] = []
+    stage_names: set[str] = set()
     for index, raw_stage in enumerate(raw_stages, start=1):
         if not isinstance(raw_stage, dict):
             raise ConfigError(f"Config stage {index} must be a mapping")
@@ -221,7 +222,11 @@ def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
         if not isinstance(name, str) or not name.strip():
             raise ConfigError(f"Config stage {index} requires a non-empty name")
 
-        stages.append(_parse_stage_settings_item(raw_stage, f"Config stage {index}", default_programmer=None))
+        stage = _parse_stage_settings_item(raw_stage, f"Config stage {index}", default_programmer=None)
+        if stage.name in stage_names:
+            raise ConfigError(f"Config stage {index} duplicates stage name: {stage.name}")
+        stage_names.add(stage.name)
+        stages.append(stage)
 
     if not stages:
         raise ConfigError("Config section 'stages' must contain at least one stage")
@@ -471,6 +476,18 @@ def _validate_stage_dependencies(
                         f"{dependency.lane}.{dependency.stage}",
                     )
                 graph[(plan.lane, stage.name)].add((dependency.lane, dependency.stage))
+
+    # A lane is serial.  A same-lane dependency must point to an earlier stage;
+    # otherwise that stage waits for work queued behind it and cannot complete.
+    for plan in plans:
+        stage_indexes = {stage.name: index for index, stage in enumerate(plan.stages)}
+        for index, stage in enumerate(plan.stages):
+            for dependency in stage.after:
+                if dependency.lane == plan.lane and stage_indexes[dependency.stage] >= index:
+                    raise ConfigError(
+                        f"Config stage '{stage.name}' cannot depend on its own or a later stage "
+                        f"'{dependency.stage}' in lane '{plan.lane}'",
+                    )
 
     visiting: set[tuple[str, str]] = set()
     visited: set[tuple[str, str]] = set()
