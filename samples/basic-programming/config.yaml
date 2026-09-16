@@ -1,3 +1,7 @@
+mqtt:
+  # Development only; use the production example for external stations.
+  transport: ${HTF_MQTT_TRANSPORT:-plaintext}
+
 station:
   org_id: ${HTF_ORG_ID}
   station_id: ${HTF_STATION_ID}

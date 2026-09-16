@@ -22,6 +22,8 @@ jobs:
       - run: uv run ruff check .
       - name: Test with coverage
         run: uv run pytest --cov=embeint_htf_station --cov-report=term-missing --cov-report=xml:coverage.xml
+      - name: Verify real Mosquitto TLS and mTLS
+        run: HTF_TLS_INTEGRATION=1 uv run pytest tests/test_tls_integration.py
       - name: Report coverage
         run: |
           python3 - <<'PY'
