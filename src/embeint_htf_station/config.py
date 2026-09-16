@@ -447,8 +447,11 @@ def _dependency_tuple(value: Any) -> tuple[StageDependencySettings, ...]:
 
 
 def _lock_tuple(value: Any) -> tuple[str, ...]:
-    locks = _str_tuple(value)
-    if any(not lock.strip() for lock in locks):
+    if value is None or value == "":
+        return ()
+    raw_locks = value if isinstance(value, list) else [value]
+    locks = tuple(str(lock).strip() for lock in raw_locks)
+    if any(not lock for lock in locks):
         raise ConfigError("Config stage locks must be non-empty strings")
     if len(set(locks)) != len(locks):
         raise ConfigError("Config stage locks must be unique")

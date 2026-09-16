@@ -479,6 +479,9 @@ def test_lane_config_rejects_duplicate_programmer_and_stage_locks() -> None:
     with pytest.raises(ConfigError, match="locks must be unique"):
         parse_stage_settings({"stages": [{"name": "flash", "locks": ["api", "api"]}]})
 
+    with pytest.raises(ConfigError, match="locks must be non-empty"):
+        parse_stage_settings({"stages": [{"name": "flash", "locks": ["  "]}]})
+
 
 def test_load_settings_from_yaml_reads_sibling_dotenv(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
