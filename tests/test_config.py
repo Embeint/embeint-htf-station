@@ -413,6 +413,33 @@ plans:
 """, (ProgrammerSettings(name="jlink_1", kind="jlink"),))
 
 
+def test_runtime_plan_parser_rejects_cross_lane_deadlock_from_serial_order() -> None:
+    programmers = (
+        ProgrammerSettings(name="jlink_1", kind="jlink"),
+        ProgrammerSettings(name="jlink_2", kind="jlink"),
+    )
+
+    with pytest.raises(ConfigError, match="cycle"):
+        parse_runtime_plans_from_yaml_text("""
+lanes:
+  - name: left
+    programmer: jlink_1
+  - name: right
+    programmer: jlink_2
+plans:
+  - lane: left
+    stages:
+      - name: first
+        after: [{lane: right, stage: second}]
+      - name: second
+  - lane: right
+    stages:
+      - name: first
+        after: [{lane: left, stage: second}]
+      - name: second
+""", programmers)
+
+
 def test_runtime_plan_parser_accepts_reordered_and_quoted_lane_fields() -> None:
     programmers = (ProgrammerSettings(name="jlink_1", kind="jlink"),)
 
@@ -451,6 +478,9 @@ def test_lane_config_rejects_duplicate_programmer_and_stage_locks() -> None:
 
     with pytest.raises(ConfigError, match="locks must be unique"):
         parse_stage_settings({"stages": [{"name": "flash", "locks": ["api", "api"]}]})
+
+    with pytest.raises(ConfigError, match="locks must be non-empty"):
+        parse_stage_settings({"stages": [{"name": "flash", "locks": ["  "]}]})
 
 
 def test_load_settings_from_yaml_reads_sibling_dotenv(tmp_path: Path) -> None:

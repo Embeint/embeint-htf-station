@@ -447,8 +447,11 @@ def _dependency_tuple(value: Any) -> tuple[StageDependencySettings, ...]:
 
 
 def _lock_tuple(value: Any) -> tuple[str, ...]:
-    locks = _str_tuple(value)
-    if any(not lock.strip() for lock in locks):
+    if value is None or value == "":
+        return ()
+    raw_locks = value if isinstance(value, list) else [value]
+    locks = tuple(str(lock).strip() for lock in raw_locks)
+    if any(not lock for lock in locks):
         raise ConfigError("Config stage locks must be non-empty strings")
     if len(set(locks)) != len(locks):
         raise ConfigError("Config stage locks must be unique")
@@ -488,6 +491,16 @@ def _validate_stage_dependencies(
                         f"Config stage '{stage.name}' cannot depend on its own or a later stage "
                         f"'{dependency.stage}' in lane '{plan.lane}'",
                     )
+
+    # The scheduler runs each lane serially, so every stage also depends on
+    # the preceding stage in its lane. Include those implicit edges before
+    # cycle detection to reject cross-lane deadlocks that explicit `after`
+    # edges alone do not reveal.
+    for plan in plans:
+        for index in range(1, len(plan.stages)):
+            graph[(plan.lane, plan.stages[index].name)].add(
+                (plan.lane, plan.stages[index - 1].name),
+            )
 
     visiting: set[tuple[str, str]] = set()
     visited: set[tuple[str, str]] = set()
