@@ -489,6 +489,16 @@ def _validate_stage_dependencies(
                         f"'{dependency.stage}' in lane '{plan.lane}'",
                     )
 
+    # The scheduler runs each lane serially, so every stage also depends on
+    # the preceding stage in its lane. Include those implicit edges before
+    # cycle detection to reject cross-lane deadlocks that explicit `after`
+    # edges alone do not reveal.
+    for plan in plans:
+        for index in range(1, len(plan.stages)):
+            graph[(plan.lane, plan.stages[index].name)].add(
+                (plan.lane, plan.stages[index - 1].name),
+            )
+
     visiting: set[tuple[str, str]] = set()
     visited: set[tuple[str, str]] = set()
     def visit(node: tuple[str, str]) -> None:
