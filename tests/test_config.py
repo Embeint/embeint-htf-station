@@ -398,6 +398,21 @@ plans:
 """, (ProgrammerSettings(name="jlink_1", kind="jlink"), ProgrammerSettings(name="jlink_2", kind="jlink")))
 
 
+def test_runtime_plan_parser_rejects_same_lane_forward_dependency() -> None:
+    with pytest.raises(ConfigError, match="later stage"):
+        parse_runtime_plans_from_yaml_text("""
+lanes:
+  - name: left
+    programmer: jlink_1
+plans:
+  - lane: left
+    stages:
+      - name: flash
+        after: [{lane: left, stage: verify}]
+      - name: verify
+""", (ProgrammerSettings(name="jlink_1", kind="jlink"),))
+
+
 def test_runtime_plan_parser_accepts_reordered_and_quoted_lane_fields() -> None:
     programmers = (ProgrammerSettings(name="jlink_1", kind="jlink"),)
 
@@ -487,3 +502,8 @@ station:
 def test_parse_stage_settings_requires_at_least_one_stage() -> None:
     with pytest.raises(ConfigError, match="at least one stage"):
         parse_stage_settings({"stages": []})
+
+
+def test_parse_stage_settings_rejects_duplicate_stage_names() -> None:
+    with pytest.raises(ConfigError, match="duplicates stage name"):
+        parse_stage_settings({"stages": [{"name": "flash"}, {"name": "flash"}]})
