@@ -10,6 +10,8 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "cryptography>=50.0.1",
+    "filelock>=3.20",
     "aiomqtt>=2.5.1",
     "click>=8.3.2",
     "pydantic>=2.13.2",

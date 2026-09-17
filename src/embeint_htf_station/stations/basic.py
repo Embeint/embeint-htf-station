@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 import structlog
+import aiomqtt
 
 from embeint_htf_station.config import (
     ConfigError, Settings, StageSettings,
@@ -19,6 +20,7 @@ from embeint_htf_station.config import (
 from embeint_htf_station.contracts.mqtt import Command, Heartbeat, HeartbeatActiveLanesItem
 from embeint_htf_station.firmware import FirmwareCache
 from embeint_htf_station.messaging.client import connect
+from embeint_htf_station.messaging.renewal import CertificateRenewer, CertificateRenewed, renewing_messages
 from embeint_htf_station.stages import StageFactory, default_stage_factories
 from embeint_htf_station.stages.hardware_id import HardwareIdStage
 from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage
@@ -64,6 +66,7 @@ class BasicStation:
         infuse_validation_hooks: Sequence[InfuseValidationHook] = (),
     ) -> None:
         self._settings = settings
+        self._certificate_renewer = CertificateRenewer(settings)
         self._stages = list(settings.stages)
         self._plans = {
             plan.lane: _RunPlan(lane=plan.lane, stages=plan.stages)
@@ -98,14 +101,29 @@ class BasicStation:
         )
 
     async def run_once(self, dut_id: str) -> TestResult:
+        await asyncio.to_thread(self._certificate_renewer.check)
         await self._load_runtime_configuration()
         plan = self._default_run_plan()
         async with connect(self._settings) as client:
+            self._certificate_renewer.connected()
             return await self._run_test(client, dut_id, run_id=None, stages=plan.stages, lane=plan.lane)
 
     async def serve_forever(self) -> None:
+        while True:
+            await asyncio.to_thread(self._certificate_renewer.check)
+            try:
+                await self._serve_session()
+                return
+            except CertificateRenewed:
+                continue
+            except aiomqtt.MqttError:
+                log.warning("basic_station.reconnecting", retry_seconds=5)
+                await asyncio.sleep(5)
+
+    async def _serve_session(self) -> None:
         await self._load_runtime_configuration()
         async with connect(self._settings) as client:
+            self._certificate_renewer.connected()
             await self._recover_interrupted_commands(client)
             await client.subscribe(f"{self._settings.topic_prefix}/cmd", qos=1)
             log.info("basic_station.subscribed", topic=f"{self._settings.topic_prefix}/cmd")
@@ -125,7 +143,8 @@ class BasicStation:
                 ),
             )
             try:
-                async for message in client.messages:
+                async for message in renewing_messages(client, self._certificate_renewer,
+                    lambda: not scheduler.active_lanes and all(q.empty() for q in scheduler.queues.values())):
                     command = self._parse_command(message.payload)
                     if command is None:
                         continue

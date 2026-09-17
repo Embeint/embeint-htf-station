@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     mqtt_ca_cert: Path | None = None
     mqtt_client_cert: Path | None = None
     mqtt_client_key: Path | None = Field(None, repr=False)
+    mqtt_auto_renew: bool = True
 
     @model_validator(mode="after")
     def validate_mqtt_transport(self) -> Self:
@@ -101,7 +102,7 @@ class Settings(BaseSettings):
         return self
 
     api_base_url: str = "http://localhost:5080"
-    station_key: str | None = None
+    station_key: str | None = Field(None, repr=False, validation_alias=AliasChoices("HTF_API_KEY", "HTF_STATION_KEY"))
     firmware_cache_dir: str = ".htf-cache/firmware"
 
     org_id: str = Field(..., description="UUID of the org this station belongs to")
