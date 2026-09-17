@@ -122,6 +122,35 @@ in support logs. To rotate, replace the certificate/key pair atomically while
 the station is stopped, restart to load them, verify a heartbeat, then revoke the
 old certificate. Existing contexts are not changed by overwriting files.
 
+### Automatic renewal
+
+Updated HTF servers support station-owned automatic certificate renewal. It is
+enabled by default for `mtls`; set `HTF_MQTT_AUTO_RENEW=false` to opt out. Keep
+`HTF_API_KEY` and a verified HTTPS `HTF_API_BASE_URL` configured. The station
+does not need an OpenBao token. Initial certificate installation is still manual.
+
+The runtime checks hourly while idle and renews seven days before expiry (or in
+the last third of a shorter certificate lifetime). Active and queued jobs defer
+renewal, so allow an idle interval before expiry. It generates a fresh private
+key locally, proves possession of its current key, and requests a replacement
+through the HTF API. Network failures retry with bounded backoff without
+discarding the current pair. Revoked/expired certificates require admin recovery.
+
+The certificate's parent directory must be writable by the station account.
+The private `.htf-mtls-<station UUID>` directory stores pending requests and
+versioned key/certificate pairs, using owner-only permissions on POSIX. Keep
+this directory persistent across restarts, private, and out of Git/support logs.
+An atomic pointer activates the replacement and MQTT reconnects between jobs.
+The server retires the old certificate after the overlap (normally 24 hours).
+Original enrollment files are preserved. For manual re-enrollment, stop the
+station and securely archive the old renewal directory before installing the
+new bundle. Do not run two station processes with the same identity.
+
+Look for `station.certificate.renewed` or `station.certificate.renewal_failed` in
+station logs. The GUI shows the new certificate's expiry and the old one's
+retirement time. Older server deployments will reject renewal until upgraded;
+do not assume installing only the station update enables end-to-end renewal.
+
 Run `uv run pytest` for unit tests. Run
 `HTF_TLS_INTEGRATION=1 uv run pytest tests/test_tls_integration.py` with Docker
 available for real Mosquitto mTLS tests (also required by CI).

@@ -10,6 +10,7 @@ import structlog
 
 from embeint_htf_station.config import ConfigError, Settings
 from embeint_htf_station.contracts.mqtt import Heartbeat
+from embeint_htf_station.messaging.inbox import MessageInbox
 
 log = structlog.get_logger(__name__)
 
@@ -61,7 +62,7 @@ def create_tls_context(settings: Settings) -> ssl.SSLContext | None:
 
 
 @asynccontextmanager
-async def connect(settings: Settings) -> AsyncIterator[aiomqtt.Client]:
+async def connect(settings: Settings, *, inbox: MessageInbox | None = None) -> AsyncIterator[aiomqtt.Client]:
     tls_context = create_tls_context(settings)
     connected = False
     try:
@@ -72,6 +73,7 @@ async def connect(settings: Settings) -> AsyncIterator[aiomqtt.Client]:
             password=settings.broker_password,
             identifier=_client_identifier(settings),
             tls_context=tls_context,
+            queue_type=inbox.queue_type if inbox is not None else None,
         ) as client:
             connected = True
             log.info("broker.connected", host=settings.broker_host, port=settings.broker_port)
