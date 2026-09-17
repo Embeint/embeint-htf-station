@@ -22,6 +22,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from filelock import FileLock, Timeout
 
 from embeint_htf_station.config import Settings
+from embeint_htf_station.messaging.inbox import MessageInbox
 
 log = structlog.get_logger(__name__)
 
@@ -220,8 +221,8 @@ class CertificateRenewer:
         return True
 
 
-async def renewing_messages(client, renewer: CertificateRenewer, idle, poll_seconds=30):
-    """Stop reading commands before the idle-only handover; never cancel a job."""
+async def renewing_messages(client, renewer: CertificateRenewer, idle, poll_seconds=30, *, inbox: MessageInbox):
+    """Hand over only while idle; the shared inbox retains unfinished reads."""
     iterator = aiter(client.messages)
     next_message = asyncio.create_task(anext(iterator))
     reconnect = False
@@ -234,11 +235,14 @@ async def renewing_messages(client, renewer: CertificateRenewer, idle, poll_seco
                 except StopAsyncIteration:
                     return
                 yield message
+                inbox.handled(message)
                 next_message = asyncio.create_task(anext(iterator))
             if idle():
                 reconnect = reconnect or await asyncio.to_thread(renewer.check)
-                # Process any command already received before switching sessions.
-                if next_message.done() or not reconnect:
+                # Prefer a completed read, but never infer queue ownership from
+                # task.done(): aiomqtt has an inner queue task. The inbox retains
+                # in-flight and buffered messages through connection teardown.
+                if next_message.done() or not reconnect or not idle():
                     continue
                 raise CertificateRenewed()
     finally:

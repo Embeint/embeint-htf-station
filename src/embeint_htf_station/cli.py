@@ -8,6 +8,7 @@ import structlog
 from embeint_htf_station.config import Settings
 from embeint_htf_station.messaging.client import connect, heartbeat_loop
 from embeint_htf_station.messaging.renewal import CertificateRenewer, CertificateRenewed, renewing_messages
+from embeint_htf_station.messaging.inbox import MessageInbox
 import aiomqtt
 
 structlog.configure(processors=[
@@ -32,14 +33,15 @@ def run() -> None:
 
 async def _serve(settings: Settings) -> None:
     renewer = CertificateRenewer(settings)
+    inbox = MessageInbox()
     while True:
         await asyncio.to_thread(renewer.check)
         try:
-            async with connect(settings) as client:
+            async with connect(settings, inbox=inbox) as client:
                 renewer.connected()
                 heartbeat = asyncio.create_task(heartbeat_loop(client, settings))
                 try:
-                    async for _ in renewing_messages(client, renewer, lambda: True):
+                    async for _ in renewing_messages(client, renewer, lambda: True, inbox=inbox):
                         pass
                 finally:
                     heartbeat.cancel()

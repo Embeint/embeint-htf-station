@@ -237,7 +237,8 @@ async def test_handover_waits_for_idle_and_preserves_received_commands():
     called = []
     renewer = SimpleNamespace(check=lambda: called.append(True) or True)
     busy = True
-    stream = renewal.renewing_messages(SimpleNamespace(messages=messages()), renewer, lambda: not busy, poll_seconds=.005)
+    stream = renewal.renewing_messages(SimpleNamespace(messages=messages()), renewer, lambda: not busy,
+                                      poll_seconds=.005, inbox=renewal.MessageInbox())
     await queue.put("first command")
     assert await anext(stream) == "first command"
     task = asyncio.create_task(anext(stream))
