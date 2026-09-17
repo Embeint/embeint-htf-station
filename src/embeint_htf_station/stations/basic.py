@@ -206,7 +206,10 @@ class BasicStation:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
-                await scheduler.stop()
+                finally:
+                    # A heartbeat can already have failed when MQTT disconnects.
+                    # Stop every lane before the outer loop starts another session.
+                    await scheduler.stop()
 
     async def _recover_interrupted_commands(self, client: _Publisher) -> None:
         for receipt in self._command_receipts.incomplete():
