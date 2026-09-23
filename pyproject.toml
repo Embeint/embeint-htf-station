@@ -3,7 +3,8 @@ name = "embeint-htf-station"
 version = "0.2.0"
 description = "Extensible Python runtime for Embeint hardware test stations"
 readme = "README.md"
-license = "Apache-2.0"
+license = "LicenseRef-FSL-1.1-ALv2"
+license-files = ["LICENSE.md"]
 keywords = ["hardware-testing", "manufacturing", "mqtt", "test-station"]
 authors = [
     { name = "Karl Von Richter", email = "karl@embeint.com" }
