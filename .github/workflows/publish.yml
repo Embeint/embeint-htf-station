@@ -43,7 +43,6 @@ jobs:
           PY
       - name: Confirm tag commit belongs to release branch
         run: |
-          git fetch --no-tags origin refs/heads/release:refs/remotes/origin/release
           if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/release; then
             echo "::error::Tag commit is not on the release branch"
             exit 1
