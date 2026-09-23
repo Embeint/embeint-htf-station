@@ -29,16 +29,17 @@ def enrolled(tmp_path):
     settings = Settings(_env_file=None, org_id=str(uuid4()), station_id=str(uuid4()), mqtt_transport="mtls",
                         mqtt_client_cert=tmp_path / "client.pem", mqtt_client_key=tmp_path / "client.key",
                         api_base_url="https://staging.example", station_key="station-api-secret")
-    def sign(public_key, days=5, uri=None):
-        return (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"station-{settings.station_id.replace('-', '')}")]))
-                .issuer_name(ca.subject).public_key(public_key).serial_number(x509.random_serial_number())
-                .not_valid_before(now - timedelta(days=25) if days <= 5 else now - timedelta(minutes=1))
-                .not_valid_after(now + timedelta(days=days))
-                .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
-                .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False)
-                .add_extension(x509.SubjectAlternativeName([x509.UniformResourceIdentifier(uri or renewal.identity(settings))]), False)
-                .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), False)
-                .sign(ca_key, hashes.SHA256()))
+    def sign(public_key, days=5, uri=None, *, ca_flag=False):
+        builder = (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"station-{settings.station_id.replace('-', '')}")]))
+                   .issuer_name(ca.subject).public_key(public_key).serial_number(x509.random_serial_number())
+                   .not_valid_before(now - timedelta(days=25) if days <= 5 else now - timedelta(minutes=1))
+                   .not_valid_after(now + timedelta(days=days))
+                   .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False)
+                   .add_extension(x509.SubjectAlternativeName([x509.UniformResourceIdentifier(uri or renewal.identity(settings))]), False)
+                   .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), False))
+        if ca_flag is not None:
+            builder = builder.add_extension(x509.BasicConstraints(ca=ca_flag, path_length=None), True)
+        return builder.sign(ca_key, hashes.SHA256())
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     cert = sign(key.public_key())
     settings.mqtt_client_cert.write_bytes(cert.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM))
@@ -64,6 +65,38 @@ def enrolled(tmp_path):
     (tmp_path / "server.pem").write_bytes(server.public_bytes(serialization.Encoding.PEM))
     (tmp_path / "server.key").write_bytes(server_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     return settings, response, sign
+
+
+def test_station_certificate_accepts_missing_leaf_basic_constraints_but_rejects_ca(enrolled):
+    settings, _, sign = enrolled
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf = sign(key.public_key(), ca_flag=None)
+    renewal.validate_certificate(leaf, key, settings)
+    ca = sign(key.public_key(), ca_flag=True)
+    with pytest.raises(ValueError, match="CA certificate"):
+        renewal.validate_certificate(ca, key, settings)
+
+
+def test_renewal_accepts_enrollment_and_replacement_without_basic_constraints(enrolled, monkeypatch):
+    settings, response, sign = enrolled
+    key = serialization.load_pem_private_key(settings.mqtt_client_key.read_bytes(), password=None)
+    chain = x509.load_pem_x509_certificates(settings.mqtt_client_cert.read_bytes())[1]
+    enrollment = sign(key.public_key(), ca_flag=None)
+    settings.mqtt_client_cert.write_bytes(
+        enrollment.public_bytes(serialization.Encoding.PEM) + chain.public_bytes(serialization.Encoding.PEM))
+
+    def bare_leaf_response(request):
+        result = response(request)
+        csr = x509.load_pem_x509_csr(request["csrPem"].encode())
+        result["certificatePem"] = sign(csr.public_key(), 30, ca_flag=None).public_bytes(serialization.Encoding.PEM).decode()
+        return result
+
+    renewer = renewal.CertificateRenewer(settings)
+    monkeypatch.setattr(renewer, "_request", bare_leaf_response)
+    assert renewer.check()
+    installed = x509.load_pem_x509_certificate(settings.mqtt_client_cert.read_bytes())
+    with pytest.raises(x509.ExtensionNotFound):
+        installed.extensions.get_extension_for_class(x509.BasicConstraints)
 
 
 @pytest.mark.skipif(os.getenv("HTF_TLS_INTEGRATION") != "1", reason="requires Docker")
