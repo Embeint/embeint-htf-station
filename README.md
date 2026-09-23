@@ -27,6 +27,37 @@ The MQTT contract is versioned in [`protocol/asyncapi.yaml`](protocol/asyncapi.y
 
 Pin the station version in an HTF workspace with the `west.yml` manifest supplied by the private server repository. Application projects should depend on released package versions through `uv`/PyPI; use an editable dependency only while developing the runtime itself.
 
+### Publishing a release
+
+The package is published to PyPI from `vX.Y.Z` tags on the long-lived `release`
+branch. The tag must match `project.version` in `pyproject.toml`, and its commit
+must be reachable from `release`. CI runs on each release-branch push; the tag
+workflow reruns checks before building a wheel and source distribution. Only
+its separate publish job can request a PyPI identity token.
+
+Before the first release, protect the `release` branch and `v*` tags, require CI
+for branch changes, and configure the GitHub `pypi` environment with required
+reviewers and deployment limited to `v*` tags. Add a PyPI Trusted Publisher
+for owner `Embeint`, repository `embeint-htf-station`, workflow `publish.yml`,
+and environment `pypi`. No long-lived PyPI API token is needed.
+
+Create `release` from tested `main` once, then advance it with subsequent
+changes from `main`. Update `project.version` for each release and apply any
+release-only fixes there. Once release-branch CI passes, tag its tip and push
+the tag. For the first release:
+
+```sh
+git switch -c release origin/main
+git push -u origin release
+git tag -a v0.2.0 -m v0.2.0
+git push origin v0.2.0
+```
+
+Repeat with new versions and tags along the same branch. PyPI distributions
+cannot be replaced under the same version. Pin station installations to an
+exact version and upgrade deliberately. A GitHub Release can be created from
+the published tag for release notes; creating it does not trigger PyPI upload.
+
 ## Layout
 
 ```
