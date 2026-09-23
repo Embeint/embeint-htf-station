@@ -1,24 +1,82 @@
 name: Publish package
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
     runs-on: [self-hosted, linux, proxmox-htf-station]
-    environment:
-      name: pypi
-      url: https://pypi.org/p/embeint-htf-station
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
+      - name: Match tag and package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          tag = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
+              raise SystemExit(f"Expected a stable vX.Y.Z tag, got {tag!r}")
+          with open("pyproject.toml", "rb") as source:
+              version = tomllib.load(source)["project"]["version"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag!r} does not match pyproject.toml version {version!r}")
+          PY
+      - name: Confirm tag commit belongs to release branch
+        run: |
+          git fetch --no-tags origin refs/heads/release:refs/remotes/origin/release
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/release; then
+            echo "::error::Tag commit is not on the release branch"
+            exit 1
+          fi
+      - run: uv run ruff check .
+      - run: uv run pytest --cov=embeint_htf_station --cov-report=term-missing
+      - name: Verify real Mosquitto TLS and mTLS
+        run: HTF_TLS_INTEGRATION=1 uv run pytest tests/test_tls_integration.py tests/test_certificate_renewal.py
+      - run: ./scripts/gen-mqtt-contracts.sh
+      - run: git diff --exit-code -- src/embeint_htf_station/contracts/mqtt.py
       - run: uv build
+      - name: Smoke test wheel and source distribution
+        run: |
+          uv run --isolated --no-project --with dist/*.whl python -c 'from embeint_htf_station.contracts import mqtt; assert mqtt is not None'
+          uv run --isolated --no-project --with dist/*.whl embeint-htf-station --help
+          uv run --isolated --no-project --with dist/*.tar.gz python -c 'from embeint_htf_station.contracts import mqtt; assert mqtt is not None'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: station-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/embeint-htf-station
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: station-distributions
+          path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
