@@ -286,3 +286,8 @@ Deploy the companion server and its reservation migration before this station
 change, and update pool plans to include explicit commit. Existing permanent
 assignments remain committed during migration. This change does not publish or
 deploy automatically.
+
+## License
+
+Licensed under the Functional Source License, Version 1.1, ALv2 Future License
+(FSL-1.1-ALv2). See [LICENSE.md](LICENSE.md) for the full terms.
