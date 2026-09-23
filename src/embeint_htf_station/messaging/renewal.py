@@ -75,8 +75,15 @@ def validate_certificate(cert: x509.Certificate, key, settings: Settings) -> Non
     eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
     if ExtendedKeyUsageOID.CLIENT_AUTH not in eku or ExtendedKeyUsageOID.SERVER_AUTH in eku:
         raise ValueError("Invalid station certificate usage")
-    if cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
-        raise ValueError("CA certificate cannot be used as a station")
+    try:
+        basic_constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+    except x509.ExtensionNotFound:
+        # End-entity certificates may omit Basic Constraints. OpenBao's station
+        # signing role can issue this shape; only an explicit CA=true is invalid.
+        pass
+    else:
+        if basic_constraints.ca:
+            raise ValueError("CA certificate cannot be used as a station")
 
 
 class CertificateRenewer:
