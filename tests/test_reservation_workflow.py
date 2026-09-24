@@ -9,7 +9,8 @@ from uuid import uuid4
 import pytest
 
 from embeint_htf_station.config import (
-    ConfigError, Settings, StageSettings, UicrWriteSettings, parse_stage_settings_from_yaml_text,
+    ConfigError, Settings, StageDependencySettings, StageSettings, UicrWriteSettings,
+    parse_stage_settings_from_yaml_text,
 )
 from embeint_htf_station.stages import StageContext, create_stage
 from embeint_htf_station.stages import id_pool
@@ -153,6 +154,75 @@ async def test_failed_prerequisite_blocks_service_and_commit(monkeypatch, servic
     result = await BasicStation(station_settings())._run_test(Publisher(), 'DUT', str(uuid4()), stages=stages)
     assert result.outcome in {'failed', 'error'}
     assert requests == []
+
+
+@pytest.mark.parametrize('dependent_stage,reserve_only', [
+    ('Reserve', False), ('External service', False), ('Reserve', True),
+])
+async def test_standalone_reservation_workflow_checks_each_stage_dependency(
+    monkeypatch, service, dependent_stage, reserve_only,
+):
+    url, requests = service
+    allocations = []
+    reservation = PoolReservation({'infuse_id': '00001'}, {'infuse_id': str(uuid4())})
+
+    def allocate(*args):
+        allocations.append(args)
+        return reservation
+
+    monkeypatch.setattr(id_pool, 'allocate_variables', allocate)
+    monkeypatch.setattr(id_pool, 'commit_variables', lambda *args: pytest.fail('Must not commit'))
+    stages = [
+        stage.model_copy(update={'after': (StageDependencySettings(lane='other', stage='Verify'),)})
+        if stage.name == dependent_stage else stage
+        for stage in (workflow(url)[:1] if reserve_only else workflow(url))
+    ]
+    result = await BasicStation(station_settings())._run_test(
+        Publisher(), 'DUT-1', str(uuid4()), stages=stages, lane='left',
+    )
+    assert result.outcome == 'failed'
+    assert next(stage.outcome for stage in result.stages if stage.name == dependent_stage) == 'failed'
+    assert len(allocations) == (0 if dependent_stage == 'Reserve' else 1)
+    assert requests == []
+
+
+async def test_changed_re_reservation_cannot_commit_an_already_registered_id(monkeypatch, service):
+    url, requests = service
+    first = PoolReservation({'infuse_id': '00001'}, {'infuse_id': str(uuid4())})
+    replacement = PoolReservation({'infuse_id': '00002'}, {'infuse_id': str(uuid4())})
+    reservations = iter((first, replacement))
+    monkeypatch.setattr(id_pool, 'allocate_variables', lambda *args: next(reservations))
+    monkeypatch.setattr(id_pool, 'commit_variables', lambda *args: pytest.fail('Must not commit'))
+    stages = list(workflow(url))
+    stages.insert(-1, StageSettings(name='Reserve again', kind='reserve_variables', variables=('infuse_id',)))
+    result = await BasicStation(station_settings())._run_test(
+        Publisher(), 'DUT-1', str(uuid4()), stages=stages,
+    )
+    assert result.outcome == 'failed'
+    assert next(stage.outcome for stage in result.stages if stage.name == 'Reserve again') == 'failed'
+    assert len(requests) == 1
+    assert requests[0][2]['id'] == '00001'
+
+
+@pytest.mark.parametrize('replacement', ['token', 'value'])
+def test_store_reservation_rejects_changed_pair_without_mutating_context(replacement):
+    context = StageContext('DUT-1')
+    token = str(uuid4())
+    original = PoolReservation({'infuse_id': '00001'}, {'infuse_id': token})
+    id_pool.store_reservation(context, 'Reserve', original)
+    id_pool.store_reservation(context, 'Reserve again', original)
+    changed = PoolReservation(
+        {'serial': 'S1', 'infuse_id': '00002' if replacement == 'value' else '00001'},
+        {'serial': str(uuid4()), 'infuse_id': str(uuid4()) if replacement == 'token' else token},
+    )
+    with pytest.raises(id_pool.IdPoolError, match='changed'):
+        id_pool.store_reservation(context, 'Reserve again', changed)
+    assert dict(context.reservations) == {'infuse_id': token}
+    assert dict(context.reserved_values) == {'infuse_id': '00001'}
+    assert context.get_output_value('provisioning.infuse_id') == '00001'
+    assert context.get_output_value('provisioning.serial') is None
+    with pytest.raises(ValueError, match='changed'):
+        context.set_reservation('Bypass', 'infuse_id', changed.reservation_ids['infuse_id'], changed.values['infuse_id'])
 
 
 @pytest.mark.parametrize('outcome', [None, 'failed', 'aborted'])

@@ -79,6 +79,16 @@ def commit_variables(settings: Settings, dut_id: str, reservation_ids: dict[str,
 
 
 def store_reservation(context: StageContext, stage_name: str, result: PoolReservation) -> None:
+    if result.values.keys() != result.reservation_ids.keys():
+        raise IdPoolError("Reservation response has mismatched values and IDs")
+    # Check the whole response before writing any outputs. A replacement after an
+    # external service used the first value must never become this run's commit.
+    for name, value in result.values.items():
+        if name in context.reservations and (
+            context.reservations[name] != result.reservation_ids[name]
+            or context.reserved_values[name] != value
+        ):
+            raise IdPoolError(f"Reservation for {name} changed within this run; reconcile before continuing")
     for name, value in result.values.items():
         context.set_output(stage_name, f"provisioning.{name}", value)
         context.set_reservation(stage_name, name, result.reservation_ids[name], value)

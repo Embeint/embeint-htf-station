@@ -34,6 +34,10 @@ class StageContext:
         return MappingProxyType(self._reserved_values)
 
     def set_reservation(self, stage_name: str, name: str, reservation_id: str, value: str) -> None:
+        if name in self._reservations and (
+            self._reservations[name] != reservation_id or self._reserved_values[name] != value
+        ):
+            raise ValueError(f"reservation for {name} changed within this run")
         self._reservations[name] = reservation_id
         self._reserved_values[name] = value
         self.set_output(stage_name, f"reservation.{name}", reservation_id)

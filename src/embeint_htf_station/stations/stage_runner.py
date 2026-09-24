@@ -102,6 +102,11 @@ class StageRunner:
         started_at = datetime.now(UTC)
         logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id, lane=lane)
         run_stages = tuple(stages)
+        check_dependencies = batch_results is not None or any(
+            stage.kind in {"reserve_variables", "allocate_variables", "commit_variables"}
+            or (stage.kind == "infuse_provisioning" and stage.provisioning_source == "id_pool")
+            for stage in run_stages
+        )
         completed_stages: list[StageResult] = []
         current_index = 0
         await logger.start()
@@ -123,6 +128,7 @@ class StageRunner:
                     stage_settings,
                     run_stages,
                     batch_results,
+                    check_dependencies,
                     activity,
                     completed_stages,
                     started_at,
@@ -208,12 +214,13 @@ class StageRunner:
         stage_settings: StageSettings,
         run_stages: tuple[StageSettings, ...],
         batch_results: Mapping[tuple[str, str], asyncio.Future[str]] | None,
+        check_dependencies: bool,
         activity: LaneActivity | None,
         completed_stages: list[StageResult],
         started_at: datetime,
         dut_id: str,
     ) -> TestResult | None:
-        dependencies = stage_settings.after if batch_results is not None or stage_settings.kind == "commit_variables" else ()
+        dependencies = stage_settings.after if check_dependencies else ()
         for dependency in dependencies:
             if activity is not None:
                 activity.status = "blocked"
