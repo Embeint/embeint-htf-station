@@ -25,7 +25,8 @@ from embeint_htf_station.messaging.renewal import CertificateRenewer, Certificat
 from embeint_htf_station.stages import StageFactory, default_stage_factories
 from embeint_htf_station.stages.hardware_id import HardwareIdStage
 from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage
-from embeint_htf_station.stages.id_pool import AllocateVariablesStage
+from embeint_htf_station.stages.id_pool import AllocateVariablesStage, CommitVariablesStage
+from embeint_htf_station.stages.http_request import HttpRequestStage
 from embeint_htf_station.stages.infuse_validation import InfuseValidationHook, InfuseValidationStage
 from embeint_htf_station.stages.nrfutil import FirmwareFlashStage, NrfutilDeviceRecoverStage, NrfutilDeviceResetStage
 from embeint_htf_station.stages.simulated_programmer import SimulatedProgrammerStage
@@ -90,6 +91,9 @@ class BasicStation:
             "hardware_id": lambda stage: HardwareIdStage(stage, self._programmers),
             "infuse_validation": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
             "infuse_validation_rtt": lambda stage: InfuseValidationStage(stage, self._programmers, infuse_validation_hooks),
+            "reserve_variables": lambda stage: AllocateVariablesStage(stage, self._settings),
+            "commit_variables": lambda stage: CommitVariablesStage(stage, self._settings),
+            "http_request": HttpRequestStage,
             "allocate_variables": lambda stage: AllocateVariablesStage(stage, self._settings),
             "infuse_provisioning": lambda stage: InfuseProvisioningStage(stage, self._programmers, self._settings),
             "simulated_programmer": lambda stage: SimulatedProgrammerStage(stage, self._programmers),
@@ -458,8 +462,8 @@ class BasicStation:
     async def _load_runtime_configuration(self) -> RuntimeConfiguration | None:
         try:
             config = await asyncio.to_thread(self._fetch_runtime_configuration)
-        except (HTTPError, URLError, TimeoutError) as exc:
-            log.warning("basic_station.configuration_pull_failed", error=str(exc))
+        except (HTTPError, URLError, TimeoutError, ValueError, KeyError) as exc:
+            log.warning("basic_station.configuration_pull_failed", error=type(exc).__name__)
             return None
 
         try:

@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 
 from embeint_htf_station.config import StageSettings
+from embeint_htf_station.stages.values import resolve_value
 from embeint_htf_station.stages.base import StageContext, StageLogger, StageResult
 
 
@@ -15,7 +16,7 @@ class PrintStage:
         started_at = datetime.now(UTC)
         await logger.log("info", "stage started")
 
-        await logger.log("info", self._settings.message)
+        await logger.log("info", resolve_value(self._settings.message, context))
         await asyncio.sleep(self._settings.wait_seconds)
 
         finished_at = datetime.now(UTC)

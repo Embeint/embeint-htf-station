@@ -10,6 +10,7 @@ import pytest
 
 from embeint_htf_station.config import Settings, StageSettings, UicrWriteSettings
 from embeint_htf_station.stages import id_pool
+from embeint_htf_station.stages.id_pool import PoolReservation
 from embeint_htf_station.stages.base import StageContext
 from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage
 
@@ -28,10 +29,10 @@ def test_station_request_preserves_text_and_sends_dut_and_version(monkeypatch):
     def response(request, timeout):
         assert request.get_header("X-station-key") == "station-secret"
         assert json.loads(request.data) == {"dutId": "DUT-1", "variables": ["infuse_id"], "recordVersion": "v2"}
-        assert request.full_url.endswith("/api/v1/stations/station/variables/allocate")
-        yield BytesIO(b'{"dutId":"DUT-1","values":{"infuse_id":"00001"}}')
+        assert request.full_url.endswith("/api/v1/stations/station/variables/reserve")
+        yield BytesIO(b'{"dutId":"DUT-1","values":{"infuse_id":"00001"},"reservationIds":{"infuse_id":"11111111-1111-1111-1111-111111111111"}}')
     monkeypatch.setattr(id_pool, "urlopen", response)
-    assert id_pool.allocate_variables(settings(), "DUT-1", ("Infuse_ID",), "v2") == {"infuse_id": "00001"}
+    assert id_pool.allocate_variables(settings(), "DUT-1", ("Infuse_ID",), "v2").values == {"infuse_id": "00001"}
 
 
 @pytest.mark.parametrize("body", [b'{}', b'{"dutId":"wrong","values":{"id":"1"}}', b'{"dutId":"DUT-1","values":{"id":12}}', b'not-json'])
@@ -42,7 +43,7 @@ def test_incomplete_or_wrong_dut_response_is_rejected(monkeypatch, body):
 
 
 async def test_generic_stage_populates_context_and_exhaustion_does_not_write_outputs(monkeypatch):
-    monkeypatch.setattr(id_pool, "allocate_variables", lambda *args: {"infuse_id": "0001", "serial_number": "A1"})
+    monkeypatch.setattr(id_pool, "allocate_variables", lambda *args: PoolReservation({"infuse_id": "0001", "serial_number": "A1"}, {"infuse_id": "token1", "serial_number": "token2"}))
     stage = id_pool.AllocateVariablesStage(StageSettings(name="IDs", variables=("infuse_id", "serial_number")), settings())
     context = StageContext("DUT-1")
     result = await stage.run(Logger(), context)
@@ -77,7 +78,7 @@ async def test_infuse_uicr_can_use_uploaded_pool_without_remote_infuse_or_hardwa
         assert dut == "DUT-1"
         assert variables == ("infuse_id",)
         assert version == "v2"
-        return {"infuse_id": pool_value}
+        return PoolReservation({"infuse_id": pool_value}, {"infuse_id": "token1"})
     monkeypatch.setattr("embeint_htf_station.stages.infuse_provisioning.allocate_variables", allocate)
     async def command(args, logger):
         calls.append(args)

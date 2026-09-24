@@ -161,31 +161,121 @@ After installing the credentials and setting station environment variables, run
 
 ## Project ID pools
 
-Compatible servers expose project variables backed by uploaded CSV pools. Add a
-stage to claim values for the current DUT:
+Project variables use uploaded CSV pools. Configure `HTF_API_KEY` and
+`HTF_API_BASE_URL`, then reserve values, use them, and explicitly commit after
+all required work succeeds:
 
 ```yaml
-- name: Allocate IDs
-  kind: allocate_variables
-  variables: [infuse_id, serial_number]
-  record_version: v2
+stages:
+  - name: Reserve IDs
+    kind: reserve_variables
+    variables: [infuse_id, serial_number]
+    record_version: v2
+
+  - name: Show ID
+    kind: print
+    message: 'ID=${provisioning.infuse_id}'
+    wait_seconds: 0
+
+  - name: Register with external service
+    kind: http_request
+    http:
+      url: https://manufacturing.example.com/devices
+      method: POST
+      headers:
+        Authorization: 'Bearer ${MANUFACTURING_TOKEN}'
+      json:
+        dut_id: '${dut_id}'
+        infuse_id: '${provisioning.infuse_id}'
+        serial_number: '${provisioning.serial_number}'
+      timeout_seconds: 30
+      expected_statuses: [200, 201]
+      outputs:
+        external.receipt: receipt.id
+
+  - name: Program reserved ID
+    kind: infuse_provisioning
+    provisioning_source: id_pool
+    programmer: jlink_1
+    uicr:
+      - name: infuse_id
+        source: context
+        value: provisioning.infuse_id
+        bytes: 8
+        endian: LSB
+
+  - name: Commit IDs
+    kind: commit_variables
+    variables: [infuse_id, serial_number]
 ```
 
-Configure `HTF_API_KEY` and `HTF_API_BASE_URL` as usual. Values are available to
-later/custom stages through `context.get_output_value("provisioning.infuse_id")`
-and the corresponding names. Values remain strings, including leading zeros.
-Allocation runs outside the event loop, so other station lanes continue.
+Replace the example service URL and response mapping with your service contract.
+`jlink_1` must be a local programmer with a target device that defines its UICR
+address; alternatively supply an explicit UICR address. Hardware programming is
+optional: use any required stages between reservation and commit. The same stage
+syntax works inside named lane plans.
 
-Repeated requests for the same DUT keep its assigned values. A new configuration
-version can request additional variables without replacing existing ones. The
-server assigns all requested fields or returns an error; an empty pool fails the
-stage. Failed programming, aborts and connection loss do not return IDs to the
-pool. Retry with the same DUT ID after a timeout; only an explicit admin release
-in the project UI makes a value available for another DUT.
+`reserve_variables` (also available as `allocate_variables`) **only reserves**.
+Reservations are exclusive to the project/DUT/variable and never expire or
+release automatically. The server handles concurrent stations atomically.
+Re-requesting the same DUT returns its reserved or committed values, even if the
+pool is otherwise empty. Additional variables in a later configuration version
+are reserved without replacing existing committed values. Values stay strings,
+including leading zeros.
 
-Existing `infuse_provisioning` stages can set `provisioning_source: id_pool` and
-an optional `record_version`. Their UICR provisioning keys are then allocated
-from uploaded project pools using the run's DUT ID. This mode does not call
-Infuse-IoT or require a prior hardware-ID stage. The default `infuse_api` mode
-continues the existing hardware-ID/Infuse API workflow. Legacy Infuse allocations
-are a separate data source and are not automatically migrated into these pools.
+Reservation writes `provisioning.<variable>` and `reservation.<variable>` into
+this run's context. `${provisioning.infuse_id}`, `${external.receipt}`, `${dut_id}`,
+and `${run_id}` can be used in string settings, including nested HTTP JSON and
+headers. `${context.provisioning.infuse_id}` is an equivalent explicit context
+reference. References resolve once immediately before each stage; a missing
+reference fails the stage. Stage names, kinds, programmer routing, variable
+lists, locks and dependency declarations remain static. Numeric configuration
+fields such as timeout and width must be literal numbers. Uppercase `${ENV_VAR}`
+is the existing configuration-time environment expansion; runtime values use
+lowercase/dotted names. Python stages can still use
+`context.get_output_value("provisioning.infuse_id")`.
+
+`http_request` supports GET/POST/PUT/PATCH/DELETE, explicit headers, optional JSON,
+timeout up to 120 seconds, expected status codes, and response outputs mapped
+from dotted JSON paths (including array indexes). Outputs must be strings or
+integers; response JSON is limited to 1 MiB when extracting outputs. The station
+credential is never automatically sent to an external service. Requests do not
+follow redirects or retry automatically. The stage supplies an `Idempotency-Key`
+derived from DUT, stage name and reservation IDs unless you provide one. It is
+stable across retries for the same reservations, and changes after explicit
+release/re-reservation. **Your service must implement idempotency** for this to
+prevent duplicate side effects; keep the stage name, request and reserved
+variable set stable when retrying.
+
+A timeout may mean the external service consumed the ID. The run fails and keeps
+the reservation. Reconcile the external outcome before rerunning side effects,
+committing, or releasing; never release just because a request timed out. After
+confirmed external success, an operator can use an approved recovery plan that
+reserves the same DUT, verifies completion and commits without repeating that
+side effect. Commit timeouts can be retried with the same reservation IDs.
+
+Put `commit_variables` after every required operation. It commits exactly the
+listed variables using their reservation IDs and is retry-safe. A missing,
+released or replaced reservation is rejected, and a repeated commit preserves
+the original timestamp/station. Plans containing a commit stop after any failed
+stage. Commit also rejects failed prerequisites and changed context values.
+Explicit cross-lane dependencies must pass; committing such a plan outside its
+batch fails because those prerequisites cannot be verified. Only declared
+cross-lane dependencies are checked; independent lanes keep their own contexts.
+
+Admin release in the project's **DUT records & IDs** history is the only way to
+make a reserved or committed value reusable. History retains reservation,
+commit and release attribution. No failure, abort, disconnect or reimport clears
+an ID.
+
+`infuse_provisioning` with `provisioning_source: id_pool` can also reserve its
+requested keys directly, but still needs a subsequent `commit_variables` stage.
+Explicit `provisioning.hardware_id` references select the pool even when a chip
+hardware ID exists. Context-only/literal UICR writes make no allocation request.
+The default `infuse_api` retains the existing Infuse workflow; it is a separate
+data source and does not automatically import legacy IDs into project pools.
+
+Deploy the companion server and its reservation migration before this station
+change, and update pool plans to include explicit commit. Existing permanent
+assignments remain committed during migration. This change does not publish or
+deploy automatically.

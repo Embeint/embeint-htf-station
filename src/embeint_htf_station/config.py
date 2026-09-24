@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,7 +25,20 @@ class StageDependencySettings(BaseModel):
     outcome: str = "passed"
 
 
+class HttpRequestSettings(BaseModel):
+    model_config = {"extra": "forbid", "hide_input_in_errors": True}
+    url: str
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "POST"
+    headers: dict[str, str] = Field(default_factory=dict)
+    json_body: dict[str, Any] | list[Any] | None = Field(default=None, alias="json")
+    timeout_seconds: float = Field(default=30, gt=0, le=120)
+    expected_statuses: tuple[int, ...] = (200, 201, 204)
+    outputs: dict[str, str] = Field(default_factory=dict)
+
+
 class StageSettings(BaseModel):
+    model_config = {"hide_input_in_errors": True}
+    http: HttpRequestSettings | None = None
     name: str
     kind: str = "print"
     message: str = "testing"
@@ -385,7 +398,20 @@ def parse_programmer_settings(data: dict[str, Any]) -> tuple[ProgrammerSettings,
     return tuple(programmers)
 
 
-def _parse_stage_settings_item(
+def _parse_stage_settings_item(raw_stage: dict[str, Any], label: str, default_programmer: str | None) -> StageSettings:
+    try:
+        return _parse_stage_settings_item_unchecked(raw_stage, label, default_programmer)
+    except ValidationError as exc:
+        # Do not log supplied values: HTTP headers may contain credentials.
+        details = "; ".join(f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in exc.errors(include_input=False, include_url=False))
+        raise ConfigError(f"{label}: {details}") from None
+    except (ValueError, TypeError) as exc:
+        if isinstance(exc, ConfigError):
+            raise
+        raise ConfigError(f"{label}: invalid stage field type or value") from None
+
+
+def _parse_stage_settings_item_unchecked(
     raw_stage: dict[str, Any],
     label: str,
     default_programmer: str | None,
@@ -415,6 +441,7 @@ def _parse_stage_settings_item(
             raw_stage.get("reset_before_capture", raw_stage.get("resetBeforeCapture", True)),
         ),
         board_pool=_optional_str(raw_stage.get("board_pool", raw_stage.get("boardPool"))),
+        http=raw_stage.get("http"),
         constants=_str_tuple(raw_stage.get("constants")),
         variables=_str_tuple(raw_stage.get("variables")),
         record_version=_optional_str(raw_stage.get("record_version", raw_stage.get("recordVersion"))),

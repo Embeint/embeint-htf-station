@@ -147,8 +147,14 @@ class StageRunner:
                     activity,
                 )
                 completed_stages.append(stage_result)
+                run_context.prerequisites_passed &= stage_result.outcome == "passed"
                 complete_stage_future(batch_results, lane, stage_result.name, stage_result.outcome)
                 await self.publish_stage_update(client, lane, run_id, index, stage_result.name, stage_result.outcome)
+                if stage_result.outcome != "passed" and any(s.kind == "commit_variables" for s in run_stages):
+                    await self._abort_remaining(client, lane, run_id, run_stages, index + 1, batch_results)
+                    result = self._result(run_id, dut_id, "failed", started_at, completed_stages)
+                    await self.publish_result(client, result, lane)
+                    return result
 
             outcome = "passed" if all(stage.outcome == "passed" for stage in completed_stages) else "failed"
             result = self._result(run_id, dut_id, outcome, started_at, completed_stages)
@@ -207,9 +213,9 @@ class StageRunner:
         started_at: datetime,
         dut_id: str,
     ) -> TestResult | None:
-        dependencies = stage_settings.after if batch_results is not None else ()
+        dependencies = stage_settings.after if batch_results is not None or stage_settings.kind == "commit_variables" else ()
         for dependency in dependencies:
-            prerequisite = batch_results.get((dependency.lane, dependency.stage))
+            prerequisite = batch_results.get((dependency.lane, dependency.stage)) if batch_results is not None else None
             if activity is not None:
                 activity.status = "blocked"
                 activity.current_stage = stage_settings.name
@@ -219,7 +225,7 @@ class StageRunner:
             if activity is not None:
                 activity.status = "running"
                 activity.waiting_reason = None
-            if prerequisite_outcome == dependency.outcome:
+            if prerequisite_outcome == dependency.outcome and (stage_settings.kind != "commit_variables" or prerequisite_outcome == "passed"):
                 continue
 
             now = datetime.now(UTC)

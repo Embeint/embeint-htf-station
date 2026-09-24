@@ -21,6 +21,22 @@ class StageContext:
         self.dut_id = dut_id
         self.run_id = run_id
         self._outputs: dict[str, StageOutput] = {}
+        self._reservations: dict[str, str] = {}
+        self._reserved_values: dict[str, str] = {}
+        self.prerequisites_passed = True
+
+    @property
+    def reservations(self) -> Mapping[str, str]:
+        return MappingProxyType(self._reservations)
+
+    @property
+    def reserved_values(self) -> Mapping[str, str]:
+        return MappingProxyType(self._reserved_values)
+
+    def set_reservation(self, stage_name: str, name: str, reservation_id: str, value: str) -> None:
+        self._reservations[name] = reservation_id
+        self._reserved_values[name] = value
+        self.set_output(stage_name, f"reservation.{name}", reservation_id)
 
     @property
     def outputs(self) -> Mapping[str, StageOutput]:
