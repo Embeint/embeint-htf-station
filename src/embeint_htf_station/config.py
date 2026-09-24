@@ -43,6 +43,9 @@ class StageSettings(BaseModel):
     reset_before_capture: bool = True
     board_pool: str | None = None
     constants: tuple[str, ...] = ()
+    variables: tuple[str, ...] = ()
+    record_version: str | None = None
+    provisioning_source: Literal["infuse_api", "id_pool"] = "infuse_api"
     uicr: tuple[UicrWriteSettings, ...] = ()
     hardware_id_address: str | int | None = None
     hardware_id_words: int | None = None
@@ -413,6 +416,9 @@ def _parse_stage_settings_item(
         ),
         board_pool=_optional_str(raw_stage.get("board_pool", raw_stage.get("boardPool"))),
         constants=_str_tuple(raw_stage.get("constants")),
+        variables=_str_tuple(raw_stage.get("variables")),
+        record_version=_optional_str(raw_stage.get("record_version", raw_stage.get("recordVersion"))),
+        provisioning_source=raw_stage.get("provisioning_source", raw_stage.get("provisioningSource", "infuse_api")),
         uicr=_uicr_tuple(raw_stage.get("uicr", raw_stage.get("uicr_writes", raw_stage.get("uicrWrites")))),
         hardware_id_address=raw_stage.get("hardware_id_address", raw_stage.get("hardwareIdAddress")),
         hardware_id_words=_optional_int(raw_stage.get("hardware_id_words", raw_stage.get("hardwareIdWords"))),
