@@ -186,6 +186,34 @@ async def test_standalone_reservation_workflow_checks_each_stage_dependency(
     assert requests == []
 
 
+async def test_failed_cross_lane_verification_cannot_authorize_registration_or_commit(monkeypatch, service):
+    url, requests = service
+    reservation = PoolReservation({'infuse_id': '00001'}, {'infuse_id': str(uuid4())})
+    commits = []
+    monkeypatch.setattr(id_pool, 'allocate_variables', lambda *args: reservation)
+
+    def commit(*args):
+        commits.append(args)
+        return reservation
+
+    monkeypatch.setattr(id_pool, 'commit_variables', commit)
+    stages = [
+        stage.model_copy(update={'after': (StageDependencySettings(lane='other', stage='Verify', outcome='failed'),)})
+        if stage.name == 'External service' else stage
+        for stage in workflow(url)
+    ]
+    verification = asyncio.get_running_loop().create_future()
+    verification.set_result('failed')
+    result = await BasicStation(station_settings())._run_test(
+        Publisher(), 'DUT-1', str(uuid4()), stages=stages, lane='left',
+        batch_results={('other', 'Verify'): verification},
+    )
+    assert result.outcome == 'failed'
+    assert next(stage.outcome for stage in result.stages if stage.name == 'External service') == 'failed'
+    assert requests == []
+    assert commits == []
+
+
 async def test_changed_re_reservation_cannot_commit_an_already_registered_id(monkeypatch, service):
     url, requests = service
     first = PoolReservation({'infuse_id': '00001'}, {'infuse_id': str(uuid4())})

@@ -102,11 +102,12 @@ class StageRunner:
         started_at = datetime.now(UTC)
         logger = BatchLogger(client, f"{self._settings.topic_prefix}/log", run_id=run_id, lane=lane)
         run_stages = tuple(stages)
-        check_dependencies = batch_results is not None or any(
+        reservation_workflow = any(
             stage.kind in {"reserve_variables", "allocate_variables", "commit_variables"}
             or (stage.kind == "infuse_provisioning" and stage.provisioning_source == "id_pool")
             for stage in run_stages
         )
+        check_dependencies = batch_results is not None or reservation_workflow
         completed_stages: list[StageResult] = []
         current_index = 0
         await logger.start()
@@ -129,6 +130,7 @@ class StageRunner:
                     run_stages,
                     batch_results,
                     check_dependencies,
+                    reservation_workflow,
                     activity,
                     completed_stages,
                     started_at,
@@ -215,6 +217,7 @@ class StageRunner:
         run_stages: tuple[StageSettings, ...],
         batch_results: Mapping[tuple[str, str], asyncio.Future[str]] | None,
         check_dependencies: bool,
+        reservation_workflow: bool,
         activity: LaneActivity | None,
         completed_stages: list[StageResult],
         started_at: datetime,
@@ -239,7 +242,8 @@ class StageRunner:
             if activity is not None:
                 activity.status = "running"
                 activity.waiting_reason = None
-            if prerequisite_outcome == dependency.outcome and (stage_settings.kind != "commit_variables" or prerequisite_outcome == "passed"):
+            required_outcome = "passed" if reservation_workflow else dependency.outcome
+            if dependency.outcome == required_outcome and prerequisite_outcome == required_outcome:
                 continue
 
             now = datetime.now(UTC)
@@ -249,7 +253,10 @@ class StageRunner:
             await self.publish_stage_update(client, lane, run_id, index, failed.name, "failed")
             await self._abort_remaining(client, lane, run_id, run_stages, index + 1, batch_results)
             result = self._result(run_id, dut_id, "failed", started_at, completed_stages, now)
-            await logger.log("error", f"dependency {dependency.lane}.{dependency.stage} did not reach {dependency.outcome}")
+            await logger.log(
+                "error",
+                f"dependency {dependency.lane}.{dependency.stage} did not satisfy required {required_outcome} outcome",
+            )
             await self.publish_result(client, result, lane)
             return result
         return None
