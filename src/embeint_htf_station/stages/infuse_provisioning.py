@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from embeint_htf_station.config import ProgrammerSettings, Settings, StageSettings, UicrWriteSettings
-from embeint_htf_station.stages.id_pool import IdPoolError, allocate_variables
+from embeint_htf_station.stages.id_pool import IdPoolError, allocate_variables, store_reservation
 from embeint_htf_station.stages.base import StageContext, StageLogger, StageOutputValue, StageResult
 from embeint_htf_station.stages.nrfutil import (
     NrfutilError,
@@ -56,19 +56,24 @@ class InfuseProvisioningStage:
         try:
             programmer = _resolve_programmer(self._settings, self._programmers)
             dut_id = context.dut_id
+            requested_keys = _requested_provisioning_keys(self._settings)
             hardware_id_value = context.get_output_value("hardware_id")
-            if self._settings.provisioning_source == "infuse_api" and (hardware_id_value is None or not str(hardware_id_value).strip()):
+            if requested_keys and self._settings.provisioning_source == "infuse_api" and (hardware_id_value is None or not str(hardware_id_value).strip()):
                 raise InfuseProvisioningError("infuse_provisioning requires a prior hardware_id stage")
             hardware_id = str(hardware_id_value)
             await logger.log("info", _describe_programmer(programmer))
             if self._settings.board_pool:
                 await logger.log("info", f"using board pool {self._settings.board_pool}")
 
-            if self._settings.provisioning_source == "id_pool":
-                provisioning_values = await asyncio.to_thread(
+            if not requested_keys:
+                provisioning_values = {}
+            elif self._settings.provisioning_source == "id_pool":
+                reservation = await asyncio.to_thread(
                     allocate_variables, self._station_settings, dut_id,
-                    _requested_provisioning_keys(self._settings), self._settings.record_version,
+                    requested_keys, self._settings.record_version,
                 )
+                store_reservation(context, self._settings.name, reservation)
+                provisioning_values = reservation.values
             else:
                 provisioning_values = self._resolve_infuse_values(programmer, hardware_id)
             for key, value in provisioning_values.items():
@@ -261,7 +266,7 @@ def _uicr_start_address(programmer: ProgrammerSettings | None) -> int | None:
 
 
 def _requested_provisioning_keys(settings: StageSettings) -> tuple[str, ...]:
-    keys = set(settings.constants)
+    keys = set(settings.constants) - {write.name for write in settings.uicr}
     for write in settings.uicr:
         source = write.source.strip().lower()
         if source in {"provisioning", "infuse_api"}:
@@ -273,7 +278,12 @@ def _requested_provisioning_keys(settings: StageSettings) -> tuple[str, ...]:
         key = str(write.value or write.name).strip()
         if not key or _try_parse_int(key) is not None:
             continue
-        key = _strip_reference_prefix(key, "provisioning")
+        if key.startswith("provisioning."):
+            keys.add(_strip_reference_prefix(key, "provisioning"))
+            continue
+        if write.value is None:
+            keys.add(write.name)
+            continue
         if key in {"dut_id", "dutId", "hardware_id", "hardwareId", "target_device", "targetDevice"}:
             continue
         if key.startswith("context."):
@@ -299,6 +309,11 @@ def _resolve_auto_value(
         return parsed
 
     key = str(settings.value).strip()
+    if key.startswith("provisioning."):
+        resolved = _lookup_mapping(provisioning_values, _strip_reference_prefix(key, "provisioning"))
+        if resolved is None:
+            raise InfuseProvisioningError(f"Infuse provisioning response did not include {key}")
+        return _parse_int(resolved, key)
     if key in {"dut_id", "dutId"}:
         if dut_id is None or not dut_id.strip():
             raise InfuseProvisioningError(f"UICR write {settings.name} requires a DUT id")
