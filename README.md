@@ -264,7 +264,9 @@ rejects failed prerequisites and changed context values. Every stage in a plan
 that reserves IDs checks its declared dependencies, including standalone runs.
 Same-lane dependencies use stages already completed in this run. A cross-lane
 dependency without a batch result fails before that stage runs, so registration
-cannot proceed without its verification prerequisite.
+cannot proceed without its verification prerequisite. Every dependency in a
+reservation plan must declare and reach `passed`; a declared `failed` outcome
+cannot authorize an external side effect or commit.
 Only declared cross-lane dependencies are checked; independent lanes keep their
 own contexts.
 
