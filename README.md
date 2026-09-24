@@ -49,6 +49,14 @@ uv run python samples/basic-station/main.py DUT-001
 
 Configuration reads identity and credentials from environment variables, so secrets remain outside source control. Library-provided stages live under `src/embeint_htf_station/stages/`; samples can register their own stage factories.
 
+Station-specific task secrets can be configured in the HTF operator UI. With
+`HTF_API_KEY` set, the station pulls them from the server at startup and after
+reconnecting, then exposes them to built-in and custom stages through
+`context.require_secret("INFUSE_API_KEY")` or the read-only `context.secrets`
+mapping. The runtime keeps the values in memory and does not add them to run
+outputs or logs. A failed authenticated pull stops station startup instead of
+running with an old value. Restart or reconnect after changing a secret.
+
 ## Station credentials
 
 Create a station from the HTF operator UI and save the one-time `.env` output. Each station has its own MQTT username/password and API key:

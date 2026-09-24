@@ -17,13 +17,26 @@ class StageOutput:
 
 
 class StageContext:
-    def __init__(self, dut_id: str, run_id: str | None = None) -> None:
+    def __init__(self, dut_id: str, run_id: str | None = None, secrets: Mapping[str, str] | None = None) -> None:
         self.dut_id = dut_id
         self.run_id = run_id
+        self._secrets = MappingProxyType(dict(secrets or {}))
         self._outputs: dict[str, StageOutput] = {}
         self._reservations: dict[str, str] = {}
         self._reserved_values: dict[str, str] = {}
         self.prerequisites_passed = True
+
+    @property
+    def secrets(self) -> Mapping[str, str]:
+        """Server-managed values for this station, held only in memory."""
+        return self._secrets
+
+    def require_secret(self, name: str) -> str:
+        """Return a secret or fail without including its value in the error."""
+        try:
+            return self._secrets[name]
+        except KeyError:
+            raise ValueError(f"station secret {name!r} is not configured") from None
 
     @property
     def reservations(self) -> Mapping[str, str]:
