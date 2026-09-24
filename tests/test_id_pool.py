@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from contextlib import contextmanager
 from io import BytesIO
 from urllib.error import HTTPError
@@ -65,13 +66,18 @@ def test_http_exhaustion_has_clear_error(monkeypatch):
         id_pool.allocate_variables(settings(), "DUT-1", ("id",))
 
 
-async def test_infuse_uicr_can_use_uploaded_pool_without_remote_infuse_or_hardware_id(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("pool_value", "expected"), [
+    ("00001", 1), ("00009", 9), ("00000", 0), ("1", 1), ("0x00001", 1), ("0x1234", 0x1234),
+])
+async def test_infuse_uicr_can_use_uploaded_pool_without_remote_infuse_or_hardware_id(
+    monkeypatch, tmp_path, pool_value, expected,
+):
     calls = []
     def allocate(station, dut, variables, version):
         assert dut == "DUT-1"
         assert variables == ("infuse_id",)
         assert version == "v2"
-        return {"infuse_id": "0x1234"}
+        return {"infuse_id": pool_value}
     monkeypatch.setattr("embeint_htf_station.stages.infuse_provisioning.allocate_variables", allocate)
     async def command(args, logger):
         calls.append(args)
@@ -82,8 +88,11 @@ async def test_infuse_uicr_can_use_uploaded_pool_without_remote_infuse_or_hardwa
     )
     context = StageContext("DUT-1")
     assert (await stage.run(Logger(), context)).outcome == "passed"
-    assert context.get_output_value("provisioning.infuse_id") == "0x1234"
+    assert context.get_output_value("provisioning.infuse_id") == pool_value
     assert len(calls) == 1
+    assert calls[0][:4] == ("nrfutil", "device", "program", "--firmware")
+    firmware = Path(calls[0][4]).read_text(encoding="ascii")
+    assert f":08100000{expected.to_bytes(8, 'little').hex().upper()}" in firmware
 
 
 def test_yaml_configuration_keeps_pool_fields():

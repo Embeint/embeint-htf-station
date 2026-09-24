@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from embeint_htf_station.config import ProgrammerSettings, Settings, StageSettings, UicrWriteSettings
 from embeint_htf_station.stages.base import StageContext
-from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningStage, UicrWrite, _intel_hex
+from embeint_htf_station.stages.infuse_provisioning import InfuseProvisioningError, InfuseProvisioningStage, UicrWrite, _intel_hex, _parse_int, _try_parse_int
 
 
 @dataclass
@@ -75,3 +77,19 @@ async def test_infuse_provisioning_stage_programs_generated_hex(tmp_path: Path) 
     assert hex_path.exists()
     assert commands[0][-2:] == ("--serial-number", "823000667")
     assert ":08D50000F7F6B43574F2FFFF" in hex_path.read_text(encoding="ascii")
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("00001", 1), ("00009", 9), (" +00042 ", 42), ("-00001", -1),
+    ("0X00001", 1), ("0b0010", 2), ("0o0010", 8), (42, 42),
+])
+def test_uicr_numeric_parsing_uses_decimal_unless_explicitly_prefixed(value, expected):
+    assert _try_parse_int(value) == expected
+    assert _parse_int(value, "id") == expected
+
+
+@pytest.mark.parametrize("value", ["", "id", "0x", "00ff", "1.5"])
+def test_uicr_numeric_parsing_rejects_invalid_values(value):
+    assert _try_parse_int(value) is None
+    with pytest.raises(InfuseProvisioningError, match="id must be an integer"):
+        _parse_int(value, "id")

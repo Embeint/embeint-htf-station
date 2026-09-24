@@ -343,19 +343,21 @@ def _strip_reference_prefix(value: str, prefix: str) -> str:
 def _try_parse_int(value: str | int) -> int | None:
     if isinstance(value, int):
         return value
+    text = str(value).strip()
+    # Uploaded IDs stay as strings: leading zeros are decimal padding, not octal.
+    # Keep explicit hex/binary/octal prefixes compatible with existing configs.
+    base = 0 if text.lstrip("+-").lower().startswith(("0x", "0b", "0o")) else 10
     try:
-        return int(str(value).strip(), 0)
+        return int(text, base)
     except ValueError:
         return None
 
 
 def _parse_int(value: str | int, field_name: str) -> int:
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value).strip(), 0)
-    except ValueError as exc:
-        raise InfuseProvisioningError(f"{field_name} must be an integer or 0x-prefixed hex value") from exc
+    parsed = _try_parse_int(value)
+    if parsed is None:
+        raise InfuseProvisioningError(f"{field_name} must be an integer or 0x-prefixed hex value")
+    return parsed
 
 
 def _intel_hex(writes: tuple[UicrWrite, ...]) -> str:
