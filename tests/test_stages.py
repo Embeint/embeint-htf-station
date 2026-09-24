@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
+
+import pytest
 
 from embeint_htf_station.config import LanePlanSettings, LaneSettings, ProgrammerSettings, Settings, StageSettings
 from embeint_htf_station.stages import StageContext, create_stage
@@ -31,6 +34,33 @@ def test_stage_context_tracks_typed_outputs() -> None:
     assert output.value == "0011223344556677"
     assert context.get_output_value("hardware_id") == "0011223344556677"
     assert context.output_values["hardware_id"] == "0011223344556677"
+
+
+def test_stage_context_secrets_are_read_only_and_missing_values_do_not_leak() -> None:
+    source = {"INFUSE_API_KEY": "private-value"}
+    context = StageContext("DUT", secrets=source)
+    source["INFUSE_API_KEY"] = "changed"
+
+    assert context.require_secret("INFUSE_API_KEY") == "private-value"
+    assert isinstance(context.secrets, MappingProxyType)
+    with pytest.raises(ValueError, match="MISSING") as error:
+        context.require_secret("MISSING")
+    assert "private-value" not in str(error.value)
+
+
+async def test_station_secret_pull_replaces_values_and_fails_closed(monkeypatch) -> None:
+    station = BasicStation(Settings(org_id="org-1", station_id="station-1", station_key="key"))
+    monkeypatch.setattr(station, "_fetch_station_secrets", lambda: {"INFUSE_API_KEY": "first"})
+    await station._load_station_secrets()
+    assert station._settings.station_secrets == {"INFUSE_API_KEY": "first"}
+
+    def unavailable():
+        raise TimeoutError()
+
+    monkeypatch.setattr(station, "_fetch_station_secrets", unavailable)
+    with pytest.raises(TimeoutError):
+        await station._load_station_secrets()
+    assert station._settings.station_secrets == {}
 
 
 async def test_print_stage_runs_from_settings(capsys) -> None:

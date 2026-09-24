@@ -119,6 +119,7 @@ class Settings(BaseSettings):
 
     api_base_url: str = "http://localhost:5080"
     station_key: str | None = Field(None, repr=False, validation_alias=AliasChoices("HTF_API_KEY", "HTF_STATION_KEY"))
+    station_secrets: dict[str, str] = Field(default_factory=dict, repr=False, exclude=True)
     firmware_cache_dir: str = ".htf-cache/firmware"
 
     org_id: str = Field(..., description="UUID of the org this station belongs to")

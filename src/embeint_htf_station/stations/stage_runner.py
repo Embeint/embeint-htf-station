@@ -117,7 +117,7 @@ class StageRunner:
             for index, stage in enumerate(run_stages):
                 await self.publish_stage_update(client, lane, run_id, index, stage.name, "pending")
 
-            run_context = StageContext(dut_id=dut_id, run_id=run_id)
+            run_context = StageContext(dut_id=dut_id, run_id=run_id, secrets=self._settings.station_secrets)
             for index, stage_settings in enumerate(run_stages):
                 current_index = index
                 dependency_failure = await self._wait_for_dependencies(

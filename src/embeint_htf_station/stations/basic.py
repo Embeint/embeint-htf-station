@@ -111,6 +111,7 @@ class BasicStation:
     async def run_once(self, dut_id: str) -> TestResult:
         await asyncio.to_thread(self._certificate_renewer.check)
         await self._load_runtime_configuration()
+        await self._load_station_secrets()
         plan = self._default_run_plan()
         async with connect(self._settings) as client:
             self._certificate_renewer.connected()
@@ -130,6 +131,7 @@ class BasicStation:
 
     async def _serve_session(self) -> None:
         await self._load_runtime_configuration()
+        await self._load_station_secrets()
         async with connect(self._settings, inbox=self._command_inbox) as client:
             self._certificate_renewer.connected()
             await self._recover_interrupted_commands(client)
@@ -493,3 +495,29 @@ class BasicStation:
             revision=int(payload["revision"]),
             yaml=str(payload["runtimeYaml"]),
         )
+
+    async def _load_station_secrets(self) -> None:
+        if not self._settings.station_key:
+            self._settings.station_secrets = {}
+            return
+        # Fail closed on an unsuccessful pull. A station should never continue
+        # with a stale credential after an operator has rotated or deleted it.
+        self._settings.station_secrets = {}
+        values = await asyncio.to_thread(self._fetch_station_secrets)
+        self._settings.station_secrets = values
+        log.info("basic_station.secrets_loaded", count=len(values))
+
+    def _fetch_station_secrets(self) -> dict[str, str]:
+        url = f"{self._settings.api_base_url.rstrip('/')}/api/v1/stations/{self._settings.station_id}/secrets/values"
+        request = Request(url, headers={
+            "Accept": "application/json",
+            "X-Station-Key": self._settings.station_key or "",
+        }, method="GET")
+        with urlopen(request, timeout=5) as response:
+            body = response.read(1_048_577)
+        if len(body) > 1_048_576:
+            raise ValueError("station secret response is too large")
+        values = json.loads(body)["secrets"]
+        if not isinstance(values, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items()):
+            raise ValueError("invalid station secret response")
+        return values
