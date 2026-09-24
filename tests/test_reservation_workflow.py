@@ -177,6 +177,53 @@ stages:
     assert result.outcome == 'failed'
 
 
+@pytest.mark.parametrize('lane,dependency_lane,dependency_stage,batched,expected', [
+    ('default', 'default', 'Verify', False, 'passed'),
+    ('left', 'left', 'Verify', False, 'passed'),
+    ('default', 'default', 'Verify', True, 'passed'),
+    ('default', 'default', 'Missing', False, 'failed'),
+    ('default', 'other', 'Verify', False, 'failed'),
+    ('left', 'default', 'Verify', False, 'failed'),
+])
+async def test_commit_resolves_completed_same_lane_dependencies(
+    monkeypatch, lane, dependency_lane, dependency_stage, batched, expected,
+):
+    reservation = PoolReservation({'infuse_id': '00001'}, {'infuse_id': str(uuid4())})
+    commits = []
+    monkeypatch.setattr(id_pool, 'allocate_variables', lambda *args: reservation)
+
+    def commit(settings, dut, ids):
+        commits.append((dut, ids))
+        return reservation
+
+    monkeypatch.setattr(id_pool, 'commit_variables', commit)
+    stages = parse_stage_settings_from_yaml_text(f'''
+stages:
+  - name: Reserve
+    kind: reserve_variables
+    variables: [infuse_id]
+  - name: Verify
+    kind: print
+    message: 'Verified ${{provisioning.infuse_id}}'
+    wait_seconds: 0
+  - name: Commit
+    kind: commit_variables
+    variables: [infuse_id]
+    after:
+      - lane: {dependency_lane}
+        stage: {dependency_stage}
+''')
+    batch = {(lane, stage.name): asyncio.get_running_loop().create_future() for stage in stages} if batched else None
+    result = await BasicStation(station_settings())._run_test(
+        Publisher(), 'DUT-1', str(uuid4()), stages=stages, lane=lane, batch_results=batch,
+    )
+    assert [(stage.name, stage.outcome) for stage in result.stages] == [
+        ('Reserve', 'passed'), ('Verify', 'passed'), ('Commit', expected),
+    ]
+    assert result.outcome == expected
+    assert commits == ([('DUT-1', reservation.reservation_ids)] if expected == 'passed' else [])
+
+
 async def test_commit_rejects_changed_or_missing_context_and_failed_prerequisites(monkeypatch):
     monkeypatch.setattr(id_pool, 'commit_variables', lambda *args: pytest.fail('Must not commit'))
     stage = id_pool.CommitVariablesStage(StageSettings(name='Commit', variables=('infuse_id',)), station_settings())

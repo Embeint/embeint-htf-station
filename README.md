@@ -259,9 +259,11 @@ listed variables using their reservation IDs and is retry-safe. A missing,
 released or replaced reservation is rejected, and a repeated commit preserves
 the original timestamp/station. Plans containing a commit stop after any failed
 stage. Commit also rejects failed prerequisites and changed context values.
-Explicit cross-lane dependencies must pass; committing such a plan outside its
-batch fails because those prerequisites cannot be verified. Only declared
-cross-lane dependencies are checked; independent lanes keep their own contexts.
+Same-lane dependencies use stages already completed in this run, including
+standalone runs. Explicit cross-lane dependencies must pass; committing such a
+plan outside its batch fails because those prerequisites cannot be verified.
+Only declared cross-lane dependencies are checked; independent lanes keep their
+own contexts.
 
 Admin release in the project's **DUT records & IDs** history is the only way to
 make a reserved or committed value reusable. History retains reservation,

@@ -215,13 +215,20 @@ class StageRunner:
     ) -> TestResult | None:
         dependencies = stage_settings.after if batch_results is not None or stage_settings.kind == "commit_variables" else ()
         for dependency in dependencies:
-            prerequisite = batch_results.get((dependency.lane, dependency.stage)) if batch_results is not None else None
             if activity is not None:
                 activity.status = "blocked"
                 activity.current_stage = stage_settings.name
                 activity.waiting_reason = f"Waiting for {dependency.lane}.{dependency.stage}"
             await self.publish_stage_update(client, lane, run_id, index, stage_settings.name, "blocked")
-            prerequisite_outcome = await asyncio.shield(prerequisite) if prerequisite is not None else None
+            if dependency.lane == lane:
+                # This lane runs sequentially, including outside a batch. Only an
+                # already completed stage can satisfy one of its prerequisites.
+                prerequisite_outcome = next(
+                    (stage.outcome for stage in completed_stages if stage.name == dependency.stage), None,
+                )
+            else:
+                prerequisite = batch_results.get((dependency.lane, dependency.stage)) if batch_results is not None else None
+                prerequisite_outcome = await asyncio.shield(prerequisite) if prerequisite is not None else None
             if activity is not None:
                 activity.status = "running"
                 activity.waiting_reason = None
