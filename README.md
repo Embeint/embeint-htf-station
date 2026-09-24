@@ -258,10 +258,13 @@ Put `commit_variables` after every required operation. It commits exactly the
 listed variables using their reservation IDs and is retry-safe. A missing,
 released or replaced reservation is rejected, and a repeated commit preserves
 the original timestamp/station. Plans containing a commit stop after any failed
-stage. Commit also rejects failed prerequisites and changed context values.
-Same-lane dependencies use stages already completed in this run, including
-standalone runs. Explicit cross-lane dependencies must pass; committing such a
-plan outside its batch fails because those prerequisites cannot be verified.
+stage. Re-reserving a variable within one run must return the same token and
+value; a changed pair fails the run before it can be committed. Commit also
+rejects failed prerequisites and changed context values. Every stage in a plan
+that reserves IDs checks its declared dependencies, including standalone runs.
+Same-lane dependencies use stages already completed in this run. A cross-lane
+dependency without a batch result fails before that stage runs, so registration
+cannot proceed without its verification prerequisite.
 Only declared cross-lane dependencies are checked; independent lanes keep their
 own contexts.
 
