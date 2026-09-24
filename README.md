@@ -158,3 +158,34 @@ available for real Mosquitto mTLS tests (also required by CI).
 A complete production transport sample is in `samples/production-mtls/config.yaml`.
 After installing the credentials and setting station environment variables, run
 `uv run python samples/basic-station/main.py --listen --config samples/production-mtls/config.yaml`.
+
+## Project ID pools
+
+Compatible servers expose project variables backed by uploaded CSV pools. Add a
+stage to claim values for the current DUT:
+
+```yaml
+- name: Allocate IDs
+  kind: allocate_variables
+  variables: [infuse_id, serial_number]
+  record_version: v2
+```
+
+Configure `HTF_API_KEY` and `HTF_API_BASE_URL` as usual. Values are available to
+later/custom stages through `context.get_output_value("provisioning.infuse_id")`
+and the corresponding names. Values remain strings, including leading zeros.
+Allocation runs outside the event loop, so other station lanes continue.
+
+Repeated requests for the same DUT keep its assigned values. A new configuration
+version can request additional variables without replacing existing ones. The
+server assigns all requested fields or returns an error; an empty pool fails the
+stage. Failed programming, aborts and connection loss do not return IDs to the
+pool. Retry with the same DUT ID after a timeout; only an explicit admin release
+in the project UI makes a value available for another DUT.
+
+Existing `infuse_provisioning` stages can set `provisioning_source: id_pool` and
+an optional `record_version`. Their UICR provisioning keys are then allocated
+from uploaded project pools using the run's DUT ID. This mode does not call
+Infuse-IoT or require a prior hardware-ID stage. The default `infuse_api` mode
+continues the existing hardware-ID/Infuse API workflow. Legacy Infuse allocations
+are a separate data source and are not automatically migrated into these pools.

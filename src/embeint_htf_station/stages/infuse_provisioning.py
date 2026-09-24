@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -10,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from embeint_htf_station.config import ProgrammerSettings, Settings, StageSettings, UicrWriteSettings
+from embeint_htf_station.stages.id_pool import IdPoolError, allocate_variables
 from embeint_htf_station.stages.base import StageContext, StageLogger, StageOutputValue, StageResult
 from embeint_htf_station.stages.nrfutil import (
     NrfutilError,
@@ -55,14 +57,20 @@ class InfuseProvisioningStage:
             programmer = _resolve_programmer(self._settings, self._programmers)
             dut_id = context.dut_id
             hardware_id_value = context.get_output_value("hardware_id")
-            if hardware_id_value is None or not str(hardware_id_value).strip():
+            if self._settings.provisioning_source == "infuse_api" and (hardware_id_value is None or not str(hardware_id_value).strip()):
                 raise InfuseProvisioningError("infuse_provisioning requires a prior hardware_id stage")
             hardware_id = str(hardware_id_value)
             await logger.log("info", _describe_programmer(programmer))
             if self._settings.board_pool:
                 await logger.log("info", f"using board pool {self._settings.board_pool}")
 
-            provisioning_values = self._resolve_infuse_values(programmer, hardware_id)
+            if self._settings.provisioning_source == "id_pool":
+                provisioning_values = await asyncio.to_thread(
+                    allocate_variables, self._station_settings, dut_id,
+                    _requested_provisioning_keys(self._settings), self._settings.record_version,
+                )
+            else:
+                provisioning_values = self._resolve_infuse_values(programmer, hardware_id)
             for key, value in provisioning_values.items():
                 context.set_output(self._settings.name, f"provisioning.{key}", value)
 
@@ -80,7 +88,7 @@ class InfuseProvisioningStage:
             )
             outcome = "passed"
             await logger.log("info", "stage passed")
-        except (InfuseProvisioningError, NrfutilError, OSError) as exc:
+        except (InfuseProvisioningError, IdPoolError, NrfutilError, OSError) as exc:
             outcome = "failed"
             await logger.log("error", str(exc))
 
