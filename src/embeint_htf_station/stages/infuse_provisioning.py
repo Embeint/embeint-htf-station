@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from embeint_htf_station.config import ProgrammerSettings, Settings, StageSettings, UicrWriteSettings
+from embeint_htf_station.http_client import open_no_redirect as urlopen
 from embeint_htf_station.stages.id_pool import IdPoolError, allocate_variables, store_reservation
 from embeint_htf_station.stages.base import StageContext, StageLogger, StageOutputValue, StageResult
 from embeint_htf_station.stages.nrfutil import (
@@ -129,8 +130,10 @@ class InfuseProvisioningStage:
         try:
             with urlopen(request, timeout=30) as response:  # nosec B310
                 data = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise InfuseProvisioningError(f"failed to resolve Infuse provisioning data: {exc}") from exc
+        except HTTPError as exc:
+            raise InfuseProvisioningError(f"failed to resolve Infuse provisioning data (HTTP {exc.code})") from None
+        except (URLError, TimeoutError, json.JSONDecodeError):
+            raise InfuseProvisioningError("failed to resolve Infuse provisioning data") from None
 
         values = data.get("values") if isinstance(data, dict) else None
         if not isinstance(values, dict):

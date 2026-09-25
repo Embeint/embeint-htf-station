@@ -6,10 +6,11 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from uuid import UUID
 
 from embeint_htf_station.config import Settings, StageSettings
+from embeint_htf_station.http_client import open_no_redirect as urlopen
 from embeint_htf_station.stages.base import StageContext, StageLogger, StageResult
 
 

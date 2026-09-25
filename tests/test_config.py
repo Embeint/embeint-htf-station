@@ -469,6 +469,18 @@ def test_runtime_plan_parser_supports_legacy_flat_plans_and_rejects_malformed_ya
         parse_runtime_plans_from_yaml_text("lanes: [", ())
 
 
+def test_yaml_parse_error_does_not_include_expanded_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "TEST_ONLY_SECRET_0e3475b9"
+    monkeypatch.setenv("DUMMY_AUDIT_SECRET", secret)
+
+    with pytest.raises(ConfigError) as error:
+        parse_runtime_plans_from_yaml_text("stages: [${DUMMY_AUDIT_SECRET}\n", ())
+
+    assert secret not in str(error.value)
+    assert "line " in str(error.value)
+    assert "column " in str(error.value)
+
+
 def test_lane_config_rejects_duplicate_programmer_and_stage_locks() -> None:
     with pytest.raises(ConfigError, match="duplicates programmer assignment"):
         parse_lane_settings({"lanes": [
