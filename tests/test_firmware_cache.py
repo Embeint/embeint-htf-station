@@ -4,10 +4,12 @@ import hashlib
 import io
 import zipfile
 from pathlib import Path
+from urllib.request import Request
 
 import pytest
 
 from embeint_htf_station.config import Settings
+from embeint_htf_station import firmware
 from embeint_htf_station.firmware import FirmwareCache, FirmwareError, FirmwareVersion
 
 
@@ -120,6 +122,50 @@ def test_firmware_cache_reports_missing_7z_extractor(tmp_path: Path, monkeypatch
 
     with pytest.raises(FirmwareError, match="requires 7z, 7zz, or 7za"):
         cache.get_file("firmware-1", "latest", "zephyr/zephyr.hex")
+
+
+@pytest.mark.parametrize(
+    ("download_url", "credential_expected"),
+    [("/download", True), ("https://files.example/download", False)],
+)
+def test_firmware_download_only_sends_station_key_to_api_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, download_url: str, credential_expected: bool,
+) -> None:
+    requests: list[Request] = []
+
+    class FakeOpener:
+        def open(self, request: Request, timeout: int) -> io.BytesIO:
+            requests.append(request)
+            assert timeout == 120
+            return io.BytesIO(b"firmware")
+
+    monkeypatch.setattr(firmware, "build_opener", lambda handler: FakeOpener())
+    settings = Settings(org_id="org-1", station_id="station-1", api_base_url="https://api.example", station_key="test-key")
+    version = FirmwareVersion("id", "v1", "firmware.zip", "", download_url)
+    destination = tmp_path / "firmware.zip"
+
+    FirmwareCache(settings)._download_archive(version, destination)
+
+    assert destination.read_bytes() == b"firmware"
+    assert requests[0].has_header("X-station-key") is credential_expected
+
+
+def test_firmware_redirect_drops_station_key_for_external_origin() -> None:
+    request = Request("https://api.example/download", headers={"X-Station-Key": "test-key"})
+    handler = firmware._SafeDownloadRedirects(("https", "api.example", 443))
+
+    redirected = handler.redirect_request(request, None, 302, "Found", {}, "https://files.example/firmware.zip")
+
+    assert redirected is not None
+    assert not redirected.has_header("X-station-key")
+
+
+def test_firmware_rejects_external_plaintext_download(tmp_path: Path) -> None:
+    settings = Settings(org_id="org-1", station_id="station-1", api_base_url="https://api.example", station_key="test-key")
+    version = FirmwareVersion("id", "v1", "firmware.zip", "", "http://files.example/firmware.zip")
+
+    with pytest.raises(FirmwareError, match="require HTTPS"):
+        FirmwareCache(settings)._download_archive(version, tmp_path / "firmware.zip")
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:

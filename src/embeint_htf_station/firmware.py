@@ -8,14 +8,41 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from embeint_htf_station.config import Settings
+from embeint_htf_station.http_client import open_no_redirect as urlopen
 
 
 class FirmwareError(RuntimeError):
     """Raised when firmware cannot be resolved, cached, or extracted."""
+
+
+def _origin(url: str) -> tuple[str, str, int]:
+    try:
+        target = urlsplit(url)
+        if target.scheme not in {"http", "https"} or not target.hostname or target.username or target.password:
+            raise ValueError("invalid URL")
+        return target.scheme, target.hostname, target.port or (443 if target.scheme == "https" else 80)
+    except ValueError:
+        raise FirmwareError("firmware download URL is invalid") from None
+
+
+class _SafeDownloadRedirects(HTTPRedirectHandler):
+    def __init__(self, api_origin: tuple[str, str, int]) -> None:
+        self._api_origin = api_origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        destination = _origin(newurl)
+        if destination != self._api_origin and destination[0] != "https":
+            raise FirmwareError("external firmware downloads require HTTPS")
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and destination != self._api_origin:
+            for header in (*redirected.headers, *redirected.unredirected_hdrs):
+                if header.lower() == "x-station-key":
+                    redirected.remove_header(header)
+        return redirected
 
 
 @dataclass(frozen=True)
@@ -94,12 +121,19 @@ class FirmwareCache:
         if url.startswith("/"):
             url = f"{self._settings.api_base_url.rstrip('/')}{url}"
 
-        request = Request(url, headers=self._headers())
+        api_origin = _origin(self._settings.api_base_url)
+        download_origin = _origin(url)
+        if download_origin != api_origin and download_origin[0] != "https":
+            raise FirmwareError("external firmware downloads require HTTPS")
+        headers = self._headers() if download_origin == api_origin else {"Accept": "application/json"}
+        request = Request(url, headers=headers)
         try:
-            with urlopen(request, timeout=120) as response, tmp_path.open("wb") as output:  # nosec B310
+            with build_opener(_SafeDownloadRedirects(api_origin)).open(request, timeout=120) as response, tmp_path.open("wb") as output:
                 shutil.copyfileobj(response, output)
-        except (HTTPError, URLError, TimeoutError) as exc:
-            raise FirmwareError(f"failed to download firmware archive: {exc}") from exc
+        except HTTPError as exc:
+            raise FirmwareError(f"failed to download firmware archive (HTTP {exc.code})") from None
+        except (URLError, TimeoutError):
+            raise FirmwareError("failed to download firmware archive") from None
 
     def _extract_file(self, firmware_id: str, version: FirmwareVersion, archive: Path, path_in_archive: str) -> Path:
         normalized_path = self._normalize_archive_path(path_in_archive)
@@ -202,8 +236,10 @@ class FirmwareCache:
         try:
             with urlopen(request, timeout=30) as response:  # nosec B310
                 data = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise FirmwareError(f"failed to resolve firmware: {exc}") from exc
+        except HTTPError as exc:
+            raise FirmwareError(f"failed to resolve firmware (HTTP {exc.code})") from None
+        except (URLError, TimeoutError, json.JSONDecodeError):
+            raise FirmwareError("failed to resolve firmware") from None
         if not isinstance(data, dict):
             raise FirmwareError("firmware resolve response was not an object")
         return data

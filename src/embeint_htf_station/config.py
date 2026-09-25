@@ -558,7 +558,11 @@ def _parse_yaml_text(text: str, path: Path) -> dict[str, Any]:
     try:
         parsed = yaml.safe_load(expanded_text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"{path}: could not parse YAML: {exc}") from exc
+        # PyYAML's error text includes the source line. Environment expansion
+        # may have inserted a credential there, so report only its location.
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ConfigError(f"{path}: could not parse YAML{location}") from None
 
     if parsed is None:
         return {}

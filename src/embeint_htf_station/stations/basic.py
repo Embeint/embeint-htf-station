@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from uuid import UUID
 
 import structlog
@@ -19,6 +19,7 @@ from embeint_htf_station.config import (
 )
 from embeint_htf_station.contracts.mqtt import Command, Heartbeat, HeartbeatActiveLanesItem
 from embeint_htf_station.firmware import FirmwareCache
+from embeint_htf_station.http_client import open_no_redirect as urlopen
 from embeint_htf_station.messaging.client import connect
 from embeint_htf_station.messaging.inbox import MessageInbox
 from embeint_htf_station.messaging.renewal import CertificateRenewer, CertificateRenewed, renewing_messages

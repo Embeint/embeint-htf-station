@@ -34,7 +34,7 @@ src/embeint_htf_station/
 ├── cli.py                    # Click entry points
 ├── config.py                 # Pydantic settings
 ├── messaging/                # MQTT client and batched logs
-├── programmers/              # J-Link, OpenOCD, and nrfutil adapters
+├── programmers/              # Programmer protocol
 ├── stages/                   # Reusable stage implementations
 ├── stations/                 # Station runtimes
 └── contracts/                # Generated from protocol/asyncapi.yaml
