@@ -34,7 +34,6 @@ src/embeint_htf_station/
 ├── cli.py                    # Click entry points
 ├── config.py                 # Pydantic settings
 ├── messaging/                # MQTT client and batched logs
-├── programmers/              # Programmer protocol
 ├── stages/                   # Reusable stage implementations
 ├── stations/                 # Station runtimes
 └── contracts/                # Generated from protocol/asyncapi.yaml
@@ -48,6 +47,8 @@ uv run python samples/basic-station/main.py DUT-001
 ```
 
 Configuration reads identity and credentials from environment variables, so secrets remain outside source control. Library-provided stages live under `src/embeint_htf_station/stages/`; samples can register their own stage factories.
+
+The `htf-station run` command only maintains a broker heartbeat; use a sample `main.py` as the starting point for a station that executes test plans.
 
 Station-specific task secrets can be configured in the HTF operator UI. With
 `HTF_API_KEY` set, the station pulls them from the server at startup and after

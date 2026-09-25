@@ -51,7 +51,6 @@ server:
 station:
   org_id: ${HTF_ORG_ID}
   station_id: ${HTF_STATION_ID}
-plugins: [infuse]
 programmers:
   - name: jlink_1
     kind: jlink
@@ -92,7 +91,6 @@ stages:
     assert settings.firmware_cache_dir == ".cache/firmware"
     assert settings.org_id == "org-1"
     assert settings.station_id == "station-1"
-    assert settings.plugins == ("infuse",)
     assert len(settings.programmers) == 1
     assert settings.programmers[0].name == "jlink_1"
     assert settings.programmers[0].kind == "jlink"
@@ -161,7 +159,7 @@ def test_load_settings_from_yaml_expands_environment_before_yaml_parse(
     monkeypatch.setenv("HTF_ORG_ID", "org-1")
     monkeypatch.setenv("HTF_STATION_ID", "station-1")
     monkeypatch.setenv("HTF_MQTT_PORT", "1887")
-    monkeypatch.setenv("HTF_PLUGIN_LIST", "[infuse, validation]")
+    monkeypatch.setenv("HTF_TEST_NAMES", "[BT, MODEM]")
 
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -171,10 +169,10 @@ mqtt:
 station:
   org_id: ${HTF_ORG_ID}
   station_id: ${HTF_STATION_ID}
-plugins: ${HTF_PLUGIN_LIST}
 stages:
   - name: Smoke
-    kind: print
+    kind: infuse_validation
+    tests: ${HTF_TEST_NAMES}
 """,
         encoding="utf-8",
     )
@@ -182,7 +180,7 @@ stages:
     settings = load_settings_from_yaml(config)
 
     assert settings.broker_port == 1887
-    assert settings.plugins == ("infuse", "validation")
+    assert settings.stages[0].tests == ("BT", "MODEM")
 
 
 def test_load_settings_from_yaml_environment_overrides_mqtt_and_server_yaml(

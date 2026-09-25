@@ -6,9 +6,6 @@ station:
   org_id: ${HTF_ORG_ID}
   station_id: ${HTF_STATION_ID}
 
-plugins:
-  - infuse
-
 programmers:
   - name: jlink_1
     kind: jlink
