@@ -26,7 +26,7 @@ def main() -> None:
 
 @main.command()
 def run() -> None:
-    """Connect to the broker and start the heartbeat loop."""
+    """Connect to the broker and maintain a heartbeat without running plans."""
     settings = Settings()  # type: ignore[call-arg]
     asyncio.run(_serve(settings))
 

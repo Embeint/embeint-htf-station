@@ -124,7 +124,6 @@ class Settings(BaseSettings):
 
     org_id: str = Field(..., description="UUID of the org this station belongs to")
     station_id: str = Field(..., description="UUID assigned to this station by the server")
-    plugins: tuple[str, ...] = ()
     programmers: tuple[ProgrammerSettings, ...] = ()
     stages: tuple[StageSettings, ...] = Field(default_factory=lambda: (
         StageSettings(name="print testing"),
@@ -182,7 +181,6 @@ def load_settings_from_yaml(path: Path) -> Settings:
         ),
         org_id=str(_required(station, "org_id")),
         station_id=str(_required(station, "station_id")),
-        plugins=_str_tuple(data.get("plugins")),
         programmers=programmers,
         stages=stages,
         lanes=lanes,
