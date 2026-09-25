@@ -28,6 +28,22 @@ def command(*args):
     return subprocess.check_output(args, text=True).strip()
 
 
+def mqtt_ready(connection):
+    """A published Docker port is ready only after Mosquitto answers CONNECT."""
+    client_id = b'htf-test-ready'
+    packet = (b'\x10' + bytes([12 + len(client_id)]) + b'\x00\x04MQTT\x04\x02\x00\x05'
+              + len(client_id).to_bytes(2, 'big') + client_id)
+    connection.sendall(packet)
+    response = b''
+    while len(response) < 4:
+        chunk = connection.recv(4 - len(response))
+        if not chunk:
+            raise ConnectionError('broker closed readiness connection')
+        response += chunk
+    if response != b'\x20\x02\x00\x00':
+        raise ConnectionError('broker rejected readiness connection')
+
+
 @pytest.fixture(scope='module')
 def pki(tmp_path_factory):
     directory = tmp_path_factory.mktemp('mqtt-pki')
@@ -85,11 +101,22 @@ def broker(pki: Path, server='server', plaintext=False):
         command('docker', 'start', container)
         port = int(json.loads(command('docker', 'inspect', container))[0]
                    ['NetworkSettings']['Ports']['8883/tcp'][0]['HostPort'])
+        probe_context = None
+        if not plaintext:
+            probe_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            probe_context.check_hostname = False
+            probe_context.verify_mode = ssl.CERT_NONE
+            probe_context.load_cert_chain(pki / 'client.pem', pki / 'client.key')
         deadline = time.monotonic() + 15
         while True:
             try:
-                with socket.create_connection(('127.0.0.1', port), timeout=.2):
-                    break
+                with socket.create_connection(('127.0.0.1', port), timeout=1) as connection:
+                    if probe_context is not None:
+                        with probe_context.wrap_socket(connection, server_hostname='localhost') as tls_connection:
+                            mqtt_ready(tls_connection)
+                    else:
+                        mqtt_ready(connection)
+                break
             except OSError:
                 if time.monotonic() > deadline:
                     pytest.fail(command('docker', 'logs', container))
