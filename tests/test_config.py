@@ -1,10 +1,13 @@
 from pathlib import Path
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from embeint_htf_station.config import (
     ConfigError,
     ProgrammerSettings,
+    StageSettings,
     load_settings_from_yaml,
     parse_lane_plan_settings,
     parse_lane_settings,
@@ -547,3 +550,46 @@ def test_parse_stage_settings_requires_at_least_one_stage() -> None:
 def test_parse_stage_settings_rejects_duplicate_stage_names() -> None:
     with pytest.raises(ConfigError, match="duplicates stage name"):
         parse_stage_settings({"stages": [{"name": "flash"}, {"name": "flash"}]})
+
+
+@pytest.mark.parametrize("named_lane", [False, True])
+@pytest.mark.parametrize("name", ["a" * 128, "😀" * 64])
+def test_runtime_config_accepts_stage_name_at_report_limit(named_lane: bool, name: str) -> None:
+    data = {"stages": [{"name": "  " + name + "  "}]}
+    if named_lane:
+        data = {"lanes": [{"name": "modem", "programmer": "probe"}],
+                "plans": [{"lane": "modem", "stages": data["stages"]}]}
+    _, plans = parse_runtime_plans_from_yaml_text(yaml.safe_dump(data), (ProgrammerSettings(name="probe", kind="simulated"),))
+    assert plans[0].stages[0].name == name
+
+
+@pytest.mark.parametrize("named_lane", [False, True])
+@pytest.mark.parametrize("name", ["a" * 129, "😀" * 65])
+def test_runtime_config_rejects_stage_name_over_report_limit(named_lane: bool, name: str) -> None:
+    data = {"stages": [{"name": name}]}
+    if named_lane:
+        data = {"lanes": [{"name": "modem", "programmer": "probe"}],
+                "plans": [{"lane": "modem", "stages": data["stages"]}]}
+    with pytest.raises(ConfigError, match="stage 1.*128 characters"):
+        parse_runtime_plans_from_yaml_text(yaml.safe_dump(data), (ProgrammerSettings(name="probe", kind="simulated"),))
+
+
+@pytest.mark.parametrize("named_lane", [False, True])
+@pytest.mark.parametrize("count", [256, 257])
+def test_runtime_config_bounds_stage_indexes(named_lane: bool, count: int) -> None:
+    data = {"stages": [{"name": f"Stage {index}"} for index in range(count)]}
+    if named_lane:
+        data = {"lanes": [{"name": "modem", "programmer": "probe"}],
+                "plans": [{"lane": "modem", "stages": data["stages"]}]}
+    programmers = (ProgrammerSettings(name="probe", kind="simulated"),)
+    if count == 256:
+        _, plans = parse_runtime_plans_from_yaml_text(yaml.safe_dump(data), programmers)
+        assert len(plans[0].stages) == count
+    else:
+        with pytest.raises(ConfigError, match="at most 256 stages"):
+            parse_runtime_plans_from_yaml_text(yaml.safe_dump(data), programmers)
+
+
+def test_python_stage_settings_rejects_long_names() -> None:
+    with pytest.raises(ValidationError, match="128 characters"):
+        StageSettings(name="a" * 129)
