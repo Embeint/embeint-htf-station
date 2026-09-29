@@ -66,6 +66,15 @@ class StageSettings(BaseModel):
     after: tuple[StageDependencySettings, ...] = ()
     capture: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        # Match the server's string length check, including non-BMP characters.
+        if not value or len(value.encode("utf-16-le")) > 256:
+            raise ValueError("stage name must contain 1 to 128 characters")
+        return value
+
     @field_validator("capture", mode="before")
     @classmethod
     def validate_capture(cls, value: Any) -> dict[str, str]:
@@ -101,7 +110,7 @@ class LaneSettings(BaseModel):
 
 class LanePlanSettings(BaseModel):
     lane: str
-    stages: tuple[StageSettings, ...]
+    stages: tuple[StageSettings, ...] = Field(max_length=256)
 
 
 class Settings(BaseSettings):
@@ -142,7 +151,7 @@ class Settings(BaseSettings):
     org_id: str = Field(..., description="UUID of the org this station belongs to")
     station_id: str = Field(..., description="UUID assigned to this station by the server")
     programmers: tuple[ProgrammerSettings, ...] = ()
-    stages: tuple[StageSettings, ...] = Field(default_factory=lambda: (
+    stages: tuple[StageSettings, ...] = Field(max_length=256, default_factory=lambda: (
         StageSettings(name="print testing"),
     ))
     lanes: tuple[LaneSettings, ...] = ()
@@ -245,6 +254,8 @@ def parse_stage_settings(data: dict[str, Any]) -> tuple[StageSettings, ...]:
         return (StageSettings(name="print testing"),)
     if not isinstance(raw_stages, list):
         raise ConfigError("Config section 'stages' must be a list")
+    if len(raw_stages) > 256:
+        raise ConfigError("Config section 'stages' supports at most 256 stages")
 
     stages: list[StageSettings] = []
     stage_names: set[str] = set()
@@ -353,6 +364,8 @@ def parse_lane_plan_settings(
             raise ConfigError(f"Config plan {index} section 'stages' must be a list")
         if not raw_stages:
             raise ConfigError(f"Config plan {index} section 'stages' must contain at least one stage")
+        if len(raw_stages) > 256:
+            raise ConfigError(f"Config plan {index} section 'stages' supports at most 256 stages")
 
         stages: list[StageSettings] = []
         stage_names: set[str] = set()

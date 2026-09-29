@@ -392,6 +392,8 @@ Only explicitly captured or mapped outputs are persisted; context outputs used b
 later stages continue to work. A missing mapped output produces a capture warning
 rather than reusing a previous stage's value or changing the test outcome.
 
+Plans support at most 256 stages per lane, and stage names are limited to 128
+characters. Both YAML and Python settings enforce these report source limits.
 A stage can capture up to 64 observations (1024 per run); keys/source names are limited to 128
 characters and values to 512 characters. Repeated identical captures in one stage
 with identical verification/subtest metadata are coalesced. Changed metadata is
