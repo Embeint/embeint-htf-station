@@ -170,7 +170,8 @@ class BasicStation:
                         log.warning("basic_station.command_missing_payload")
                         continue
                     if command.kind == "ack-report":
-                        self._report_outbox.acknowledge(str(payload.get("deliveryId", "")))
+                        self._report_outbox.acknowledge(str(payload.get("deliveryId", "")),
+                            status=payload.get("status", "accepted"), reason=payload.get("reason"))
                         continue
                     if not self._command_receipts.claim(command):
                         log.info("basic_station.command_duplicate", command_id=str(command.id))

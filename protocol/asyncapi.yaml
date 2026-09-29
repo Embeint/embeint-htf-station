@@ -285,4 +285,8 @@ components:
           enum: [run-plan, run-batch, abort-run, reboot, ack-report]
         payload:
           type: object
+          description: >-
+            ack-report carries deliveryId, status (accepted or rejected), and an optional
+            reason. Missing status means accepted for compatibility. Only permanent
+            validation errors are rejected; operational failures remain retryable.
           additionalProperties: true

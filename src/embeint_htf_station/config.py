@@ -71,6 +71,8 @@ class StageSettings(BaseModel):
     def validate_capture(cls, value: Any) -> dict[str, str]:
         from embeint_htf_station.stages.base import CAPTURE_KEY
 
+        if value is None:
+            return {}
         if not isinstance(value, dict) or len(value) > 64:
             raise ValueError("capture must be a mapping with at most 64 fields")
         for key, source in value.items():

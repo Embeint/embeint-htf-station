@@ -454,7 +454,7 @@ class StageRunner:
             deliveryId=delivery_id,
             dutId=dut_id,
             configRevision=self._get_config_revision(),
-            observations=[_wire_observation(item) for item in observations],
+            observations=[_wire_observation(item) for item in observations] if run_id else [],
             captureIssues=list(capture_issues),
             ts=datetime.now(UTC),
             runId=run_id,
@@ -470,20 +470,28 @@ class StageRunner:
         issues = [f"{stage.name}: {issue}" for stage in result.stages for issue in stage.capture_issues]
         delivery_id = uuid4() if result.run_id and (observations or issues) else None
         payload = _report_model(replace(result, lane=lane)).model_copy(
-            update={"delivery_id": delivery_id},
+            update={"delivery_id": delivery_id, "observations": [_wire_observation(item) for item in observations] if result.run_id else []},
         ).model_dump_json(by_alias=True)
         await self._publish_report(client, "result", payload, delivery_id)
 
     async def _publish_report(self, client: Publisher, kind: str, payload: str, delivery_id: UUID | None) -> None:
         topic = f"{self._settings.topic_prefix}/{kind}"
+        stored = False
         if delivery_id is not None and self._outbox is not None:
-            self._outbox.store(str(delivery_id), topic, payload)
+            try:
+                self._outbox.store(str(delivery_id), topic, payload)
+                stored = True
+            except (OSError, RuntimeError):
+                log.error("stage_runner.report_storage_failed", delivery_id=delivery_id, exc_info=True)
         try:
             await client.publish(topic, payload=payload, qos=1)
         except Exception:
             if delivery_id is None or self._outbox is None:
                 raise
-            log.warning("stage_runner.report_pending", delivery_id=delivery_id)
+            if stored:
+                log.warning("stage_runner.report_pending", delivery_id=delivery_id)
+            else:
+                log.error("stage_runner.report_not_delivered", delivery_id=delivery_id, exc_info=True)
 
 
 def _report_model(result: TestResult) -> MqttTestResult:

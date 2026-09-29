@@ -48,36 +48,46 @@ class StageContext:
         self._stage_outputs: dict[str, StageOutput] = {}
         self._captures: list[StageObservation] = []
         self._capture_total = 0
+        self._capture_issues: list[str] = []
 
     def begin_stage(self, index: int, name: str) -> None:
         self._stage_index = index
         self._stage_name = name
         self._stage_outputs = {}
         self._captures = []
+        self._capture_issues = []
 
     def capture(
         self, key: str, value: StageOutputValue, *, verified: bool | None = None, subtest: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Attach a scalar to this stage's DUT report. Verification defaults to the stage outcome."""
-        if len(key) > 128 or CAPTURE_KEY.fullmatch(key) is None:
-            raise ValueError("capture key must be a lowercase dotted field name, at most 128 characters")
+        def issue(message: str) -> bool:
+            if message not in self._capture_issues and len(self._capture_issues) < 128:
+                self._capture_issues.append(message)
+            return False
+
+        if not isinstance(key, str) or len(key) > 128 or CAPTURE_KEY.fullmatch(key) is None:
+            return issue("capture key must be a lowercase dotted field name, at most 128 characters")
         if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).strip():
-            raise ValueError(f"capture '{key}' requires a non-empty string or integer")
+            return issue(f"capture '{key}' requires a non-empty string or integer")
         text = str(value).strip()
         if len(text) > 512:
-            raise ValueError(f"capture '{key}' exceeds 512 characters")
-        if subtest is not None and (not subtest.strip() or len(subtest) > 128):
-            raise ValueError("capture subtest must contain 1 to 128 characters")
-        if any(item.key == key and item.value == text for item in self._captures):
-            return
+            return issue(f"capture '{key}' exceeds 512 characters")
+        if subtest is not None and (not isinstance(subtest, str) or not subtest.strip() or len(subtest) > 128):
+            return issue("capture subtest must contain 1 to 128 characters")
+        if verified is not None and not isinstance(verified, bool):
+            return issue(f"capture '{key}' verification must be a boolean")
+        if any((item.key, item.value, item.verified, item.subtest) == (key, text, verified, subtest) for item in self._captures):
+            return True
         if len(self._captures) >= 64 or self._capture_total >= 1024:
-            raise ValueError("capture limit reached: 64 observations per stage, 1024 per run")
+            return issue("capture limit reached: 64 observations per stage, 1024 per run")
         self._capture_total += 1
         self._captures.append(StageObservation(
             id=str(uuid4()), key=key, value=text, stage_index=self._stage_index,
             stage_name=self._stage_name, sequence=sum(item.key == key for item in self._captures),
             observed_at=datetime.now(UTC), verified=verified, subtest=subtest,
         ))
+        return True
 
     def finish_captures(
         self, outcome: str, mappings: Mapping[str, str],
@@ -88,16 +98,13 @@ class StageContext:
             if output is None:
                 issues.append(f"Capture '{key}': output '{source}' was not produced by this stage")
                 continue
-            try:
-                self.capture(key, output.value, verified=output.verified, subtest=output.subtest)
-            except ValueError as exc:
-                issues.append(str(exc))
+            self.capture(key, output.value, verified=output.verified, subtest=output.subtest)
         conflicting = {item.key for item in self._captures
                        if len({other.value for other in self._captures if other.key == item.key}) > 1}
         issues.extend(f"Capture '{key}': conflicting values; observations are unverified" for key in sorted(conflicting))
         return tuple(replace(item, verified=False if item.key in conflicting else (
             item.verified if item.verified is not None else outcome == "passed"
-        )) for item in self._captures), tuple(issues)
+        )) for item in self._captures), tuple(dict.fromkeys([*self._capture_issues, *issues]))
 
     @property
     def secrets(self) -> Mapping[str, str]:
