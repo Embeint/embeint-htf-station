@@ -44,6 +44,7 @@ from embeint_htf_station.stations.scheduler import (
     run_lane_worker,
 )
 from embeint_htf_station.stations.command_receipts import CommandReceiptStore
+from embeint_htf_station.messaging.report_outbox import ReportOutbox
 from embeint_htf_station.stations.stage_runner import StageRunner, StageScopedLogger as _StageScopedLogger, TestResult
 
 log = structlog.get_logger(__name__)
@@ -84,6 +85,7 @@ class BasicStation:
         self._programmers = {programmer.name: programmer for programmer in settings.programmers}
         self._firmware_cache = FirmwareCache(settings)
         self._command_receipts = CommandReceiptStore(settings)
+        self._report_outbox = ReportOutbox(settings)
         self._stage_factories = default_stage_factories()
         self._stage_factories.update({
             "nrfutil_device_recover": lambda stage: NrfutilDeviceRecoverStage(stage, self._programmers),
@@ -107,6 +109,7 @@ class BasicStation:
             self._stage_locks,
             lambda: self._runtime_config_revision,
             self._publish_heartbeat,
+            self._report_outbox,
         )
 
     async def run_once(self, dut_id: str) -> TestResult:
@@ -153,6 +156,7 @@ class BasicStation:
                     scheduler.state,
                 ),
             )
+            report_task = asyncio.create_task(self._report_outbox.serve(client))
             try:
                 async for message in renewing_messages(client, self._certificate_renewer,
                     lambda: not scheduler.active_lanes and all(q.empty() for q in scheduler.queues.values()),
@@ -164,6 +168,9 @@ class BasicStation:
                     payload = command.payload
                     if not isinstance(payload, dict):
                         log.warning("basic_station.command_missing_payload")
+                        continue
+                    if command.kind == "ack-report":
+                        self._report_outbox.acknowledge(str(payload.get("deliveryId", "")))
                         continue
                     if not self._command_receipts.claim(command):
                         log.info("basic_station.command_duplicate", command_id=str(command.id))
@@ -213,6 +220,11 @@ class BasicStation:
                         continue
                     await scheduler.enqueue(_QueuedRun(run_id, dut_id.strip(), plan, {}, command.id))
             finally:
+                report_task.cancel()
+                try:
+                    await report_task
+                except (asyncio.CancelledError, aiomqtt.MqttError):
+                    pass
                 heartbeat_task.cancel()
                 try:
                     await heartbeat_task

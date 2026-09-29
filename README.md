@@ -331,3 +331,82 @@ deploy automatically.
 
 Licensed under the Functional Source License, Version 1.1, ALv2 Future License
 (FSL-1.1-ALv2). See [LICENSE.md](LICENSE.md) for the full terms.
+
+## Captured DUT test reports
+
+Custom stages contribute data with one call. The runner attaches the DUT, run,
+lane, stage, and capture time, and sends the observations with the test result:
+
+```python
+async def run(self, logger, context):
+    started_at = datetime.now(UTC)
+    context.capture("modem.imei", imei)
+    context.capture("sim.iccid", iccid)
+    # Return the usual StageResult. Captures inherit its pass/fail outcome.
+    return StageResult(self.settings.name, "passed", started_at, datetime.now(UTC))
+```
+
+Pass `verified=True` and `subtest="MODEM"` only when that source subtest has
+successfully validated the value. This keeps a successful modem capture usable
+when an unrelated test fails later. Values read from failed or interrupted stages
+remain in the report as unverified observations.
+
+A caller that receives a `TestResult` can collect the report without reading logs:
+
+```python
+report = result.report()                # JSON-ready report, including stages and observations
+values = result.captured_values         # Successful values from this run, keyed by field name
+observations = result.observations      # Complete observations with original stage provenance
+Path("dut-report.json").write_text(json.dumps(report, indent=2))
+```
+
+For built-in stages, add `capture` mappings from report fields to stage outputs:
+
+```yaml
+stages:
+  - name: Read modem hardware ID
+    kind: hardware_id
+    capture:
+      modem.hardware_id: hardware_id
+  - name: Validate modem
+    kind: infuse_validation_rtt
+    tests: [MODEM]
+    capture:
+      modem.imei: validation.modem.imei
+      sim.iccid: validation.modem.iccid
+      sim.imsi: validation.modem.imsi
+      modem.model: validation.modem.model
+      modem.firmware_version: validation.modem.firmware_version
+```
+
+Keep the programmer/transport settings required by those stages. Infuse validation
+exports `VAL` fields as `validation.<test>.<field>` and recognizes existing modem
+`INFO` labels for IMEI, ICCID, IMSI, model, manufacturer, and firmware version.
+Modem fields are verified by MODEM PASS, independently of the overall validator
+outcome. Contradictory modem values remain unverified.
+
+Fields use lowercase dotted names. Use separate component keys such as
+`bluetooth.hardware_id` and `modem.hardware_id` for two parallel lanes. Capture
+values are strings on the wire, preserving leading zeroes and long identifiers.
+Only explicitly captured or mapped outputs are persisted; context outputs used by
+later stages continue to work. A missing mapped output produces a capture warning
+rather than reusing a previous stage's value or changing the test outcome.
+
+A stage can capture up to 64 observations (1024 per run); keys/source names are limited to 128
+characters and values to 512 characters. Repeated identical captures in one stage
+are coalesced. Conflicting direct captures are retained as unverified observations.
+
+Capture-bearing stage and result messages are saved under
+`.htf-cache/report-outbox/<station-id>` by default, alongside the command receipts.
+Keep this directory on persistent storage. Listening stations retry pending reports
+after disconnect/restart and remove them only after a server database-commit
+acknowledgement. Final results repeat the same observation IDs so retries are
+idempotent. Persistence occurs at stage completion/interruption, not at every
+hardware read. `run_once()` callers can use the local report helper; production
+server history uses the run IDs provided by server commands.
+
+Deploy capture-aware server support before enabling these station mappings.
+Legacy stations remain accepted and have no observations. The DUT summary keeps
+every run's history, promotes successful captures, retains omitted fields on
+retests, and flags changes to hardware ID, IMEI, ICCID, or IMSI. Report readers can
+fetch structured data without requesting raw console logs.

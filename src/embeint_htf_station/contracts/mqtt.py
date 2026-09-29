@@ -42,7 +42,21 @@ class LogBatch(ContractModel):
     lane: str = Field(...)
     entries: list[LogBatchEntriesItem] = Field(...)
 
+class RunObservation(ContractModel):
+    id: UUID = Field(...)
+    key: str = Field(...)
+    value: str = Field(...)
+    stage_index: int = Field(alias="stageIndex")
+    stage_name: str = Field(alias="stageName")
+    sequence: int = Field(...)
+    observed_at: datetime = Field(alias="observedAt")
+    verified: bool = Field(...)
+    subtest: str | None = Field(default=None, alias="subtest")
+
 class TestResult(ContractModel):
+    delivery_id: UUID | None = Field(default=None, alias="deliveryId")
+    capture_issues: list[str] | None = Field(default=None, alias="captureIssues")
+    observations: list[RunObservation] | None = Field(default=None, alias="observations")
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
     lane: str = Field(...)
@@ -54,6 +68,11 @@ class TestResult(ContractModel):
     stages: list[TestResultStagesItem] | None = Field(default=None, alias="stages")
 
 class Stage(ContractModel):
+    delivery_id: UUID | None = Field(default=None, alias="deliveryId")
+    capture_issues: list[str] | None = Field(default=None, alias="captureIssues")
+    observations: list[RunObservation] | None = Field(default=None, alias="observations")
+    dut_id: str | None = Field(default=None, alias="dutId")
+    config_revision: int | None = Field(default=None, alias="configRevision")
     ts: datetime = Field(...)
     run_id: UUID | None = Field(default=None, alias="runId")
     lane: str = Field(...)
@@ -63,5 +82,5 @@ class Stage(ContractModel):
 
 class Command(ContractModel):
     id: UUID = Field(...)
-    kind: Literal['run-plan', 'run-batch', 'abort-run', 'reboot'] = Field(...)
+    kind: Literal['run-plan', 'run-batch', 'abort-run', 'reboot', 'ack-report'] = Field(...)
     payload: dict[str, Any] | None = Field(default=None, alias="payload")

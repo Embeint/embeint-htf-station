@@ -1,7 +1,7 @@
 asyncapi: 3.0.0
 info:
   title: Embeint HTF MQTT
-  version: 0.2.0
+  version: 0.3.0
   description: Station <-> server MQTT wire protocol.
 
 servers:
@@ -171,10 +171,34 @@ components:
               msg:
                 type: string
 
+    RunObservation:
+      type: object
+      required: [id, key, value, stageIndex, stageName, sequence, observedAt, verified]
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string, maxLength: 128 }
+        value: { type: string, maxLength: 512 }
+        stageIndex: { type: integer }
+        stageName: { type: string, maxLength: 128 }
+        sequence: { type: integer }
+        observedAt: { type: string, format: date-time }
+        verified: { type: boolean }
+        subtest: { type: string, nullable: true, maxLength: 128 }
+
     TestResult:
       type: object
       required: [ts, lane, dutId, outcome, startedAt, finishedAt]
       properties:
+        deliveryId:
+          type: string
+          format: uuid
+          nullable: true
+        captureIssues:
+          type: array
+          items: { type: string }
+        observations:
+          type: array
+          items: { $ref: "#/components/schemas/RunObservation" }
         ts:
           type: string
           format: date-time
@@ -220,6 +244,18 @@ components:
       type: object
       required: [ts, lane, index, name, status]
       properties:
+        deliveryId:
+          type: string
+          format: uuid
+          nullable: true
+        captureIssues:
+          type: array
+          items: { type: string }
+        observations:
+          type: array
+          items: { $ref: "#/components/schemas/RunObservation" }
+        dutId: { type: string, nullable: true }
+        configRevision: { type: integer, nullable: true }
         ts:
           type: string
           format: date-time
@@ -246,7 +282,7 @@ components:
           format: uuid
         kind:
           type: string
-          enum: [run-plan, run-batch, abort-run, reboot]
+          enum: [run-plan, run-batch, abort-run, reboot, ack-report]
         payload:
           type: object
           additionalProperties: true

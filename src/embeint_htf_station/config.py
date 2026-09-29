@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, ValidationError, model_validator
+from pydantic import field_validator, AliasChoices, BaseModel, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -64,6 +64,21 @@ class StageSettings(BaseModel):
     hardware_id_words: int | None = None
     locks: tuple[str, ...] = ()
     after: tuple[StageDependencySettings, ...] = ()
+    capture: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("capture", mode="before")
+    @classmethod
+    def validate_capture(cls, value: Any) -> dict[str, str]:
+        from embeint_htf_station.stages.base import CAPTURE_KEY
+
+        if not isinstance(value, dict) or len(value) > 64:
+            raise ValueError("capture must be a mapping with at most 64 fields")
+        for key, source in value.items():
+            if not isinstance(key, str) or len(key) > 128 or CAPTURE_KEY.fullmatch(key) is None:
+                raise ValueError("capture field must be a lowercase dotted name, at most 128 characters")
+            if not isinstance(source, str) or not source.strip() or len(source) > 128:
+                raise ValueError(f"capture field {key!r} requires a non-empty output name, at most 128 characters")
+        return {key: source.strip() for key, source in value.items()}
 
 
 class ProgrammerSettings(BaseModel):
@@ -450,6 +465,7 @@ def _parse_stage_settings_item_unchecked(
         hardware_id_words=_optional_int(raw_stage.get("hardware_id_words", raw_stage.get("hardwareIdWords"))),
         locks=_lock_tuple(raw_stage.get("locks")),
         after=_dependency_tuple(raw_stage.get("after")),
+        capture=raw_stage.get("capture", {}),
     )
 
 
