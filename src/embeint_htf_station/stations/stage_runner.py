@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Protocol
+from uuid import UUID, uuid4
 
 import structlog
 
 from embeint_htf_station.config import Settings, StageSettings
-from embeint_htf_station.contracts.mqtt import Stage, TestResult as MqttTestResult, TestResultStagesItem
+from embeint_htf_station.contracts.mqtt import RunObservation, Stage, TestResult as MqttTestResult, TestResultStagesItem
 from embeint_htf_station.messaging.batch_logger import BatchLogger
-from embeint_htf_station.stages import StageContext, StageFactory, StageResult, create_stage
+from embeint_htf_station.messaging.report_outbox import ReportOutbox
+from embeint_htf_station.stages import StageContext, StageFactory, StageObservation, StageResult, create_stage
 from embeint_htf_station.stations.scheduler import LaneActivity
 
 log = structlog.get_logger(__name__)
@@ -33,6 +35,21 @@ class TestResult:
     started_at: datetime
     finished_at: datetime
     stages: tuple[StageResult, ...]
+    lane: str = "default"
+
+    def report(self) -> dict[str, object]:
+        """Return a JSON-ready DUT test report without console logs."""
+        return _report_model(self).model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    @property
+    def observations(self) -> tuple[StageObservation, ...]:
+        """All captured observations, with their original stage provenance."""
+        return tuple(item for stage in self.stages for item in stage.observations)
+
+    @property
+    def captured_values(self) -> dict[str, str]:
+        """Latest successful values in this run; full history remains in observations."""
+        return {item.key: item.value for item in self.observations if item.verified}
 
 
 class StageScopedLogger:
@@ -80,12 +97,14 @@ class StageRunner:
         stage_locks: dict[str, asyncio.Lock],
         get_config_revision: Callable[[], int | None],
         publish_heartbeat: HeartbeatPublisher,
+        outbox: ReportOutbox | None = None,
     ) -> None:
         self._settings = settings
         self._stage_factories = stage_factories
         self._stage_locks = stage_locks
         self._get_config_revision = get_config_revision
         self._publish_heartbeat = publish_heartbeat
+        self._outbox = outbox
 
     async def run(
         self,
@@ -110,6 +129,8 @@ class StageRunner:
         check_dependencies = batch_results is not None or reservation_workflow
         completed_stages: list[StageResult] = []
         current_index = 0
+        run_context = StageContext(dut_id=dut_id, run_id=run_id, secrets=self._settings.station_secrets)
+        active_started_at: datetime | None = None
         await logger.start()
         try:
             await self._publish_heartbeat(client, "running", run_id, [activity] if activity else None)
@@ -117,7 +138,6 @@ class StageRunner:
             for index, stage in enumerate(run_stages):
                 await self.publish_stage_update(client, lane, run_id, index, stage.name, "pending")
 
-            run_context = StageContext(dut_id=dut_id, run_id=run_id, secrets=self._settings.station_secrets)
             for index, stage_settings in enumerate(run_stages):
                 current_index = index
                 dependency_failure = await self._wait_for_dependencies(
@@ -144,6 +164,8 @@ class StageRunner:
                     activity.current_stage = stage_settings.name
                     activity.waiting_reason = None
                 await self.publish_stage_update(client, lane, run_id, index, stage_settings.name, "running")
+                run_context.begin_stage(index, stage_settings.name)
+                active_started_at = datetime.now(UTC)
                 stage_result = await self._execute_stage(
                     client,
                     logger,
@@ -154,23 +176,37 @@ class StageRunner:
                     stage_settings,
                     activity,
                 )
+                observations, issues = run_context.finish_captures(stage_result.outcome, stage_settings.capture)
+                stage_result = replace(stage_result, observations=observations, capture_issues=issues)
+                for issue in issues:
+                    await logger.log("warning", issue)
                 completed_stages.append(stage_result)
+                active_started_at = None
                 run_context.prerequisites_passed &= stage_result.outcome == "passed"
                 complete_stage_future(batch_results, lane, stage_result.name, stage_result.outcome)
-                await self.publish_stage_update(client, lane, run_id, index, stage_result.name, stage_result.outcome)
+                await self.publish_stage_update(
+                    client, lane, run_id, index, stage_result.name, stage_result.outcome,
+                    dut_id=dut_id, observations=stage_result.observations, capture_issues=stage_result.capture_issues,
+                )
                 if stage_result.outcome != "passed" and any(s.kind == "commit_variables" for s in run_stages):
                     await self._abort_remaining(client, lane, run_id, run_stages, index + 1, batch_results)
-                    result = self._result(run_id, dut_id, "failed", started_at, completed_stages)
+                    result = self._result(run_id, dut_id, "failed", started_at, completed_stages, lane=lane)
                     await self.publish_result(client, result, lane)
                     return result
 
             outcome = "passed" if all(stage.outcome == "passed" for stage in completed_stages) else "failed"
-            result = self._result(run_id, dut_id, outcome, started_at, completed_stages)
+            result = self._result(run_id, dut_id, outcome, started_at, completed_stages, lane=lane)
             await logger.log("info", f"basic test {outcome} for DUT {dut_id}")
             await self.publish_result(client, result, lane)
             log.info("stage_runner.finished", dut_id=dut_id, outcome=outcome)
             return result
         except asyncio.CancelledError:
+            if active_started_at is not None:
+                settings = run_stages[current_index]
+                observations, issues = run_context.finish_captures("aborted", settings.capture)
+                completed_stages.append(StageResult(
+                    settings.name, "aborted", active_started_at, datetime.now(UTC), observations, issues,
+                ))
             return await self._finish_interrupted(
                 client,
                 logger,
@@ -186,6 +222,12 @@ class StageRunner:
                 "basic test aborted",
             )
         except Exception as exception:
+            if active_started_at is not None:
+                settings = run_stages[current_index]
+                observations, issues = run_context.finish_captures("error", settings.capture)
+                completed_stages.append(StageResult(
+                    settings.name, "error", active_started_at, datetime.now(UTC), observations, issues,
+                ))
             log.exception("stage_runner.failed", run_id=run_id, dut_id=dut_id)
             return await self._finish_interrupted(
                 client,
@@ -252,7 +294,7 @@ class StageRunner:
             complete_stage_future(batch_results, lane, failed.name, "failed")
             await self.publish_stage_update(client, lane, run_id, index, failed.name, "failed")
             await self._abort_remaining(client, lane, run_id, run_stages, index + 1, batch_results)
-            result = self._result(run_id, dut_id, "failed", started_at, completed_stages, now)
+            result = self._result(run_id, dut_id, "failed", started_at, completed_stages, now, lane=lane)
             await logger.log(
                 "error",
                 f"dependency {dependency.lane}.{dependency.stage} did not satisfy required {required_outcome} outcome",
@@ -311,7 +353,7 @@ class StageRunner:
     ) -> TestResult:
         status = "aborted" if outcome == "aborted" else "error"
         await self._mark_remaining(client, lane, run_id, run_stages, current_index, batch_results, status)
-        result = self._result(run_id, dut_id, outcome, started_at, completed_stages)
+        result = self._result(run_id, dut_id, outcome, started_at, completed_stages, lane=lane)
         await logger.log("warning" if outcome == "aborted" else "error", f"{message} for DUT {dut_id}")
         await self.publish_result(client, result, lane)
         log.info("stage_runner.finished", dut_id=dut_id, outcome=outcome)
@@ -351,6 +393,8 @@ class StageRunner:
         started_at: datetime,
         stages: Sequence[StageResult],
         finished_at: datetime | None = None,
+        *,
+        lane: str = "default",
     ) -> TestResult:
         return TestResult(
             run_id,
@@ -360,6 +404,7 @@ class StageRunner:
             started_at,
             finished_at or datetime.now(UTC),
             tuple(stages),
+            lane,
         )
 
     async def publish_aborted(self, client: Publisher, run_id: str | None, dut_id: str, lane: str) -> None:
@@ -399,8 +444,18 @@ class StageRunner:
         index: int,
         name: str,
         status: str,
+        *,
+        dut_id: str | None = None,
+        observations: Sequence[StageObservation] = (),
+        capture_issues: Sequence[str] = (),
     ) -> None:
+        delivery_id = uuid4() if run_id and (observations or capture_issues) else None
         payload = Stage(
+            deliveryId=delivery_id,
+            dutId=dut_id,
+            configRevision=self._get_config_revision(),
+            observations=[_wire_observation(item) for item in observations],
+            captureIssues=list(capture_issues),
             ts=datetime.now(UTC),
             runId=run_id,
             lane=lane,
@@ -408,29 +463,47 @@ class StageRunner:
             name=name,
             status=status,
         ).model_dump_json(by_alias=True)
-        await client.publish(f"{self._settings.topic_prefix}/stage", payload=payload, qos=1)
+        await self._publish_report(client, "stage", payload, delivery_id)
 
     async def publish_result(self, client: Publisher, result: TestResult, lane: str) -> None:
-        payload = MqttTestResult(
-            ts=result.finished_at,
-            runId=result.run_id,
-            lane=lane,
-            dutId=result.dut_id,
-            outcome=result.outcome,
-            configRevision=result.config_revision,
-            startedAt=result.started_at,
-            finishedAt=result.finished_at,
-            stages=[
-                TestResultStagesItem(
-                    name=stage.name,
-                    outcome=stage.outcome,
-                    startedAt=stage.started_at,
-                    finishedAt=stage.finished_at,
-                )
-                for stage in result.stages
-            ],
+        observations = [item for stage in result.stages for item in stage.observations]
+        issues = [f"{stage.name}: {issue}" for stage in result.stages for issue in stage.capture_issues]
+        delivery_id = uuid4() if result.run_id and (observations or issues) else None
+        payload = _report_model(replace(result, lane=lane)).model_copy(
+            update={"delivery_id": delivery_id},
         ).model_dump_json(by_alias=True)
-        await client.publish(f"{self._settings.topic_prefix}/result", payload=payload, qos=1)
+        await self._publish_report(client, "result", payload, delivery_id)
+
+    async def _publish_report(self, client: Publisher, kind: str, payload: str, delivery_id: UUID | None) -> None:
+        topic = f"{self._settings.topic_prefix}/{kind}"
+        if delivery_id is not None and self._outbox is not None:
+            self._outbox.store(str(delivery_id), topic, payload)
+        try:
+            await client.publish(topic, payload=payload, qos=1)
+        except Exception:
+            if delivery_id is None or self._outbox is None:
+                raise
+            log.warning("stage_runner.report_pending", delivery_id=delivery_id)
+
+
+def _report_model(result: TestResult) -> MqttTestResult:
+    return MqttTestResult(
+        ts=result.finished_at, runId=result.run_id, lane=result.lane, dutId=result.dut_id,
+        outcome=result.outcome, configRevision=result.config_revision,
+        startedAt=result.started_at, finishedAt=result.finished_at,
+        observations=[_wire_observation(item) for item in result.observations],
+        captureIssues=[f"{stage.name}: {issue}" for stage in result.stages for issue in stage.capture_issues],
+        stages=[TestResultStagesItem(
+            name=stage.name, outcome=stage.outcome, startedAt=stage.started_at, finishedAt=stage.finished_at,
+        ) for stage in result.stages],
+    )
+
+
+def _wire_observation(item: StageObservation) -> RunObservation:
+    return RunObservation(
+        id=UUID(item.id), key=item.key, value=item.value, stageIndex=item.stage_index, stageName=item.stage_name,
+        sequence=item.sequence, observedAt=item.observed_at, verified=bool(item.verified), subtest=item.subtest,
+    )
 
 
 def complete_stage_future(

@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+import re
 from types import MappingProxyType
 from typing import Protocol
+from uuid import uuid4
 
 StageOutputValue = str | int
+CAPTURE_KEY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*")
+
+
+@dataclass(frozen=True)
+class StageObservation:
+    id: str
+    key: str
+    value: str
+    stage_index: int
+    stage_name: str
+    sequence: int
+    observed_at: datetime
+    verified: bool | None = None
+    subtest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -14,6 +30,8 @@ class StageOutput:
     stage_name: str
     name: str
     value: StageOutputValue
+    verified: bool | None = None
+    subtest: str | None = None
 
 
 class StageContext:
@@ -25,6 +43,61 @@ class StageContext:
         self._reservations: dict[str, str] = {}
         self._reserved_values: dict[str, str] = {}
         self.prerequisites_passed = True
+        self._stage_index = 0
+        self._stage_name = ""
+        self._stage_outputs: dict[str, StageOutput] = {}
+        self._captures: list[StageObservation] = []
+        self._capture_total = 0
+
+    def begin_stage(self, index: int, name: str) -> None:
+        self._stage_index = index
+        self._stage_name = name
+        self._stage_outputs = {}
+        self._captures = []
+
+    def capture(
+        self, key: str, value: StageOutputValue, *, verified: bool | None = None, subtest: str | None = None,
+    ) -> None:
+        """Attach a scalar to this stage's DUT report. Verification defaults to the stage outcome."""
+        if len(key) > 128 or CAPTURE_KEY.fullmatch(key) is None:
+            raise ValueError("capture key must be a lowercase dotted field name, at most 128 characters")
+        if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).strip():
+            raise ValueError(f"capture '{key}' requires a non-empty string or integer")
+        text = str(value).strip()
+        if len(text) > 512:
+            raise ValueError(f"capture '{key}' exceeds 512 characters")
+        if subtest is not None and (not subtest.strip() or len(subtest) > 128):
+            raise ValueError("capture subtest must contain 1 to 128 characters")
+        if any(item.key == key and item.value == text for item in self._captures):
+            return
+        if len(self._captures) >= 64 or self._capture_total >= 1024:
+            raise ValueError("capture limit reached: 64 observations per stage, 1024 per run")
+        self._capture_total += 1
+        self._captures.append(StageObservation(
+            id=str(uuid4()), key=key, value=text, stage_index=self._stage_index,
+            stage_name=self._stage_name, sequence=sum(item.key == key for item in self._captures),
+            observed_at=datetime.now(UTC), verified=verified, subtest=subtest,
+        ))
+
+    def finish_captures(
+        self, outcome: str, mappings: Mapping[str, str],
+    ) -> tuple[tuple[StageObservation, ...], tuple[str, ...]]:
+        issues: list[str] = []
+        for key, source in mappings.items():
+            output = self._stage_outputs.get(source)
+            if output is None:
+                issues.append(f"Capture '{key}': output '{source}' was not produced by this stage")
+                continue
+            try:
+                self.capture(key, output.value, verified=output.verified, subtest=output.subtest)
+            except ValueError as exc:
+                issues.append(str(exc))
+        conflicting = {item.key for item in self._captures
+                       if len({other.value for other in self._captures if other.key == item.key}) > 1}
+        issues.extend(f"Capture '{key}': conflicting values; observations are unverified" for key in sorted(conflicting))
+        return tuple(replace(item, verified=False if item.key in conflicting else (
+            item.verified if item.verified is not None else outcome == "passed"
+        )) for item in self._captures), tuple(issues)
 
     @property
     def secrets(self) -> Mapping[str, str]:
@@ -63,13 +136,20 @@ class StageContext:
     def output_values(self) -> Mapping[str, StageOutputValue]:
         return MappingProxyType({key: output.value for key, output in self._outputs.items()})
 
-    def set_output(self, stage_name: str, name: str, value: StageOutputValue) -> None:
+    def set_output(
+        self, stage_name: str, name: str, value: StageOutputValue,
+        *, verified: bool | None = None, subtest: str | None = None,
+    ) -> None:
         output_name = _output_name(name)
         self._outputs[output_name] = StageOutput(
             stage_name=stage_name,
             name=output_name,
             value=value,
+            verified=verified,
+            subtest=subtest,
         )
+        if stage_name == self._stage_name:
+            self._stage_outputs[output_name] = self._outputs[output_name]
 
     def get_output(self, name: str) -> StageOutput | None:
         output_name = _output_name(name)
@@ -100,6 +180,8 @@ class StageResult:
     outcome: str
     started_at: datetime
     finished_at: datetime
+    observations: tuple[StageObservation, ...] = ()
+    capture_issues: tuple[str, ...] = ()
 
 
 class StageLogger(Protocol):

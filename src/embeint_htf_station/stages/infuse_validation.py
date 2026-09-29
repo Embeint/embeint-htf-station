@@ -36,6 +36,7 @@ class InfuseValidationState:
     success_total: int | None = None
     infuse_id: str | None = None
     lines_seen: int = 0
+    conflicting_values: set[tuple[str, str]] = field(default_factory=set)
 
     @property
     def complete(self) -> bool:
@@ -92,6 +93,18 @@ class InfuseValidationStage:
         except (InfuseValidationError, NrfutilError, OSError) as exc:
             await logger.log("error", str(exc))
             outcome = "failed"
+
+        finally:
+            for test, values in state.values.items():
+                for key, value in values.items():
+                    output_name = re.sub(r"[^a-z0-9_]+", "_", key.lower()).strip("_")
+                    if output_name and value.strip():
+                        context.set_output(
+                            self._settings.name, f"validation.{test.lower()}.{output_name}", value.strip(),
+                            verified=test in state.passed_tests and test not in state.failed_tests
+                            and (test, key) not in state.conflicting_values,
+                            subtest=test,
+                        )
 
         return StageResult(
             name=self._settings.name,
@@ -305,10 +318,21 @@ def parse_infuse_line(line: str, state: InfuseValidationState) -> None:
         state.passed_tests.add(test)
     elif level in {"FAIL", "ERROR"} and not (test == "SYS" and "Complete with" in payload):
         state.failed_tests.add(test)
-    elif level == "VAL":
-        key, _, value = payload.partition(":")
-        if key:
-            state.values.setdefault(test, {})[key] = value
+    elif level == "VAL" or (test == "MODEM" and level == "INFO"):
+        key, separator, value = payload.partition(":")
+        key = key.strip()
+        if test == "MODEM":
+            labels = {"Modem IMEI": "imei", "IMEI": "imei", "ICCID": "iccid", "IMSI": "imsi",
+                      "Modem Model": "model", "Manufacturer": "manufacturer", "Firmware Version": "firmware_version"}
+            if level == "INFO" and key not in labels:
+                return
+            key = labels.get(key, key.lower())
+        if key and separator:
+            values = state.values.setdefault(test, {})
+            value = value.strip()
+            if key in values and values[key] != value:
+                state.conflicting_values.add((test, key))
+            values[key] = value
 
     if test == "SYS" and level in {"SUCCESS", "PASS", "ERROR"}:
         success = _SUCCESS_LINE.search(payload)
