@@ -394,16 +394,29 @@ rather than reusing a previous stage's value or changing the test outcome.
 
 A stage can capture up to 64 observations (1024 per run); keys/source names are limited to 128
 characters and values to 512 characters. Repeated identical captures in one stage
-are coalesced. Conflicting direct captures are retained as unverified observations.
+with identical verification/subtest metadata are coalesced. Changed metadata is
+retained as another observation. Conflicting values are retained as unverified
+observations. Invalid direct captures, empty values, and limit violations return
+`False` and add a report warning without changing the hardware outcome. An empty
+`capture:` mapping is optional. Quote output names that YAML would otherwise read
+as booleans, numbers, or null.
 
 Capture-bearing stage and result messages are saved under
 `.htf-cache/report-outbox/<station-id>` by default, alongside the command receipts.
 Keep this directory on persistent storage. Listening stations retry pending reports
-after disconnect/restart and remove them only after a server database-commit
-acknowledgement. Final results repeat the same observation IDs so retries are
+after disconnect/restart with exponential backoff from 10 seconds to 10 minutes.
+Accepted reports are removed only after a server database-commit acknowledgement.
+Permanent server rejections and invalid local records move into `rejected/`, with
+the original envelope and reason retained for inspection, and are no longer retried.
+The active queue holds up to 10,000 reports; additional envelopes are written to
+`deferred/` and promoted as space becomes available. All three directories require
+disk space. A storage failure emits `report_storage_failed`, attempts live upload,
+and leaves the hardware outcome intact; durability requires a successful disk write.
+Final results repeat the same observation IDs so retries are
 idempotent. Persistence occurs at stage completion/interruption, not at every
 hardware read. `run_once()` callers can use the local report helper; production
-server history uses the run IDs provided by server commands.
+server history uses the run IDs provided by server commands. Calls without a run
+ID retain captures in the local helper but omit observations from MQTT messages.
 
 Deploy capture-aware server support before enabling these station mappings.
 Legacy stations remain accepted and have no observations. The DUT summary keeps

@@ -15,6 +15,199 @@ from embeint_htf_station.stations.basic import BasicStation
 from tests.test_infuse_validation import FakeTransport, Logger
 
 
+async def test_run_once_keeps_captures_local_and_off_the_wire(tmp_path, monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+    from embeint_htf_station.stations import basic
+
+    class CaptureStage:
+        def __init__(self, settings):
+            self.settings = settings
+
+        async def run(self, logger, context):
+            context.capture("sim.iccid", "0000123")
+            now = datetime.now(UTC)
+            return StageResult(self.settings.name, "passed", now, now)
+
+    publisher = Publisher()
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield publisher
+
+    station = BasicStation(Settings(_env_file=None, org_id=str(uuid4()), station_id=str(uuid4()),
+        firmware_cache_dir=str(tmp_path / "firmware"), stages=(StageSettings(name="Read", kind="probe"),)),
+        stage_factories={"probe": CaptureStage})
+    monkeypatch.setattr(basic, "connect", connect)
+    monkeypatch.setattr(station, "_load_runtime_configuration", AsyncMock())
+    monkeypatch.setattr(station, "_load_station_secrets", AsyncMock())
+    result = await station.run_once("DUT")
+    assert result.report()["observations"][0]["value"] == "0000123"
+    for topic, message in publisher.messages:
+        if topic.endswith(("/stage", "/result")):
+            assert not message.get("observations")
+            assert not message.get("deliveryId")
+    assert not station._report_outbox.pending()
+
+
+async def test_rejected_report_is_quarantined_and_not_replayed(tmp_path) -> None:
+    settings = Settings(_env_file=None, org_id=str(uuid4()), station_id=str(uuid4()),
+        firmware_cache_dir=str(tmp_path / "firmware"))
+    outbox = ReportOutbox(settings)
+    delivery = str(uuid4())
+    outbox.store(delivery, f"{settings.topic_prefix}/result", json.dumps({"deliveryId": delivery}))
+    outbox.acknowledge(delivery, status="rejected", reason="Capture source does not match its stage update.")
+    restarted = ReportOutbox(settings)
+    replay = Publisher()
+    await restarted.replay(replay)
+    assert not replay.messages
+    quarantined = list((outbox.directory / "rejected").glob("*.json"))
+    assert len(quarantined) == 1
+    assert json.loads(quarantined[0].read_text())["rejectionReason"] == "Capture source does not match its stage update."
+
+
+async def test_retry_backoff_survives_restart_and_active_limit_defers_without_loss(tmp_path, monkeypatch) -> None:
+    from embeint_htf_station.messaging import report_outbox
+    clock = [1000.0]
+    monkeypatch.setattr(report_outbox.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ReportOutbox, "ACTIVE_LIMIT", 1)
+    settings = Settings(_env_file=None, org_id=str(uuid4()), station_id=str(uuid4()),
+        firmware_cache_dir=str(tmp_path / "firmware"))
+    outbox = ReportOutbox(settings)
+    ids = [str(uuid4()), str(uuid4())]
+    for delivery in ids:
+        outbox.store(delivery, f"{settings.topic_prefix}/result", json.dumps({"deliveryId": delivery}))
+    assert len(list((outbox.directory / "deferred").glob("*.json"))) == 1
+    publisher = Publisher()
+    await outbox.replay(publisher, force=False)
+    assert not publisher.messages
+    clock[0] = 1010
+    await outbox.replay(publisher, force=False)
+    assert len(publisher.messages) == 1
+    restarted = ReportOutbox(settings)
+    clock[0] = 1020
+    await restarted.replay(publisher, force=False)
+    assert len(publisher.messages) == 1
+    clock[0] = 1030
+    await restarted.replay(publisher, force=False)
+    assert len(publisher.messages) == 2
+    restarted.acknowledge(ids[0])
+    await restarted.replay(publisher)
+    assert publisher.messages[-1][1]["deliveryId"] == ids[1]
+    restarted.acknowledge(ids[1])
+    assert not restarted.pending()
+
+
+def test_bad_local_outbox_record_is_retained_outside_retry_queue(tmp_path) -> None:
+    settings = Settings(_env_file=None, org_id=str(uuid4()), station_id=str(uuid4()),
+        firmware_cache_dir=str(tmp_path / "firmware"))
+    outbox = ReportOutbox(settings)
+    outbox.directory.mkdir(parents=True)
+    (outbox.directory / f"{uuid4()}.json").write_text("bad json")
+    assert not outbox.pending()
+    assert len(list((outbox.directory / "rejected").glob("*.json"))) == 1
+
+
+async def test_run_plan_uses_the_only_named_lane(tmp_path, monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from embeint_htf_station.config import LanePlanSettings, LaneSettings
+    from embeint_htf_station.contracts.mqtt import Command
+    from embeint_htf_station.stations import basic
+
+    finished = asyncio.Event()
+    run_id = str(uuid4())
+    command = Command(id=uuid4(), kind="run-plan", payload={"runId": run_id, "dutId": "DUT"})
+
+    class NamedPublisher(Publisher):
+        async def publish(self, topic, payload, qos=0):
+            await super().publish(topic, payload, qos)
+            if topic.endswith("/result"):
+                finished.set()
+
+    publisher = NamedPublisher()
+
+    async def messages():
+        yield SimpleNamespace(payload=command.model_dump_json().encode())
+        await finished.wait()
+
+    publisher.messages_stream = messages()
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield SimpleNamespace(messages=publisher.messages_stream, publish=publisher.publish, subscribe=AsyncMock())
+
+    station = BasicStation(Settings(_env_file=None, org_id=str(uuid4()), station_id=str(uuid4()),
+        firmware_cache_dir=str(tmp_path / "firmware"), lanes=(LaneSettings(name="modem", programmer="probe"),),
+        plans=(LanePlanSettings(lane="modem", stages=(StageSettings(name="Read", kind="print", wait_seconds=0),)),)))
+    monkeypatch.setattr(basic, "connect", connect)
+    monkeypatch.setattr(station, "_load_runtime_configuration", AsyncMock())
+    monkeypatch.setattr(station, "_load_station_secrets", AsyncMock())
+    await asyncio.wait_for(station._serve_session(), 5)
+    final = next(message for topic, message in publisher.messages if topic.endswith("/result"))
+    assert final["lane"] == "modem"
+    assert final["runId"] == run_id
+    assert final["outcome"] == "passed"
+
+
+def test_capture_keeps_changed_verification_and_subtest_for_the_same_value() -> None:
+    context = StageContext("DUT")
+    context.begin_stage(0, "Read")
+    context.capture("sim.iccid", "0000123", verified=False, subtest="before")
+    context.capture("sim.iccid", "0000123", verified=True, subtest="MODEM")
+    observations, issues = context.finish_captures("failed", {})
+    assert not issues
+    assert len(observations) == 2
+    assert observations[1].verified and observations[1].subtest == "MODEM"
+
+
+@pytest.mark.parametrize("source", ["on", "yes", "null", "1.5", "0x12", "12:34", ".nan", "2026-09-29", "!!bool true"])
+def test_capture_mapping_rejects_yaml_non_strings(source) -> None:
+    with pytest.raises(ConfigError):
+        parse_stage_settings_from_yaml_text(f"stages:\n  - name: Read\n    capture: {{ sim.iccid: {source} }}\n")
+
+
+@pytest.mark.parametrize("source", ["'on'", '"yes"', "!!str null", "'1.5'", "validation.modem.iccid"])
+def test_capture_mapping_accepts_explicit_strings(source) -> None:
+    assert parse_stage_settings_from_yaml_text(f"stages:\n  - name: Read\n    capture: {{ sim.iccid: {source} }}\n")[0].capture
+
+
+def test_empty_capture_mapping_is_optional() -> None:
+    assert parse_stage_settings_from_yaml_text("stages:\n  - name: Read\n    capture:\n")[0].capture == {}
+
+
+async def test_direct_capture_and_storage_errors_do_not_change_hardware_outcome(tmp_path, monkeypatch) -> None:
+    class OfflinePublisher(Publisher):
+        async def publish(self, topic, payload, qos=0):
+            if json.loads(payload).get("deliveryId"):
+                raise OSError("offline")
+            await super().publish(topic, payload, qos)
+
+    class CaptureStage:
+        def __init__(self, settings):
+            self.settings = settings
+
+        async def run(self, logger, context):
+            assert not context.capture("sim.iccid", "")
+            assert not context.capture("custom.long", "x" * 513)
+            context.capture("modem.imei", "0000123")
+            now = datetime.now(UTC)
+            return StageResult(self.settings.name, "passed", now, now)
+
+    station = BasicStation(Settings(_env_file=None, org_id=str(uuid4()), station_id=str(uuid4()),
+        firmware_cache_dir=str(tmp_path / "firmware")), stage_factories={"probe": CaptureStage})
+
+    def unavailable(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(station._report_outbox, "store", unavailable)
+    result = await station._run_test(OfflinePublisher(), "DUT", str(uuid4()), stages=(StageSettings(name="Read", kind="probe"),))
+    assert result.outcome == "passed"
+    assert result.captured_values == {"modem.imei": "0000123"}
+    assert len(result.report()["captureIssues"]) == 2
+
+
 class Publisher:
     def __init__(self) -> None:
         self.messages: list[tuple[str, dict]] = []
@@ -62,8 +255,10 @@ def test_run_capture_limit_matches_the_server_report_limit() -> None:
         assert len(captures) == 64
         assert not issues
     context.begin_stage(16, "Read")
-    with pytest.raises(ValueError, match="1024 per run"):
-        context.capture("custom.extra", "0001")
+    assert not context.capture("custom.extra", "0001")
+    captures, issues = context.finish_captures("passed", {})
+    assert not captures
+    assert "1024 per run" in issues[0]
 
 
 @pytest.mark.parametrize("mapping", ["[]", "{ Bad: hardware_id }", "{ modem.imei: 123 }", "{ modem.imei: '' }"])
