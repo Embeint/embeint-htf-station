@@ -5,8 +5,9 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from http.client import HTTPException
 from typing import Protocol
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import Request
 from uuid import UUID
 
@@ -135,7 +136,7 @@ class BasicStation:
 
     async def _serve_session(self) -> None:
         await self._load_runtime_configuration()
-        await self._load_station_secrets()
+        secrets_loaded = await self._load_station_secrets()
         async with connect(self._settings, inbox=self._command_inbox) as client:
             self._certificate_renewer.connected()
             await self._recover_interrupted_commands(client)
@@ -157,6 +158,7 @@ class BasicStation:
                 ),
             )
             report_task = asyncio.create_task(self._report_outbox.serve(client))
+            secrets_task = None if secrets_loaded else asyncio.create_task(self._retry_station_secrets())
             try:
                 async for message in renewing_messages(client, self._certificate_renewer,
                     lambda: not scheduler.active_lanes and all(q.empty() for q in scheduler.queues.values()),
@@ -221,6 +223,9 @@ class BasicStation:
                         continue
                     await scheduler.enqueue(_QueuedRun(run_id, dut_id.strip(), plan, {}, command.id))
             finally:
+                if secrets_task is not None:
+                    secrets_task.cancel()
+                    await asyncio.gather(secrets_task, return_exceptions=True)
                 report_task.cancel()
                 try:
                     await report_task
@@ -478,7 +483,9 @@ class BasicStation:
     async def _load_runtime_configuration(self) -> RuntimeConfiguration | None:
         try:
             config = await asyncio.to_thread(self._fetch_runtime_configuration)
-        except (HTTPError, URLError, TimeoutError, ValueError, KeyError) as exc:
+        except (OSError, HTTPException, ValueError, KeyError) as exc:
+            if isinstance(exc, HTTPError):
+                exc.close()
             log.warning("basic_station.configuration_pull_failed", error=type(exc).__name__)
             return None
 
@@ -510,16 +517,31 @@ class BasicStation:
             yaml=str(payload["runtimeYaml"]),
         )
 
-    async def _load_station_secrets(self) -> None:
+    async def _load_station_secrets(self) -> bool:
         if not self._settings.station_key:
             self._settings.station_secrets = {}
-            return
+            return True
         # Fail closed on an unsuccessful pull. A station should never continue
         # with a stale credential after an operator has rotated or deleted it.
         self._settings.station_secrets = {}
-        values = await asyncio.to_thread(self._fetch_station_secrets)
+        try:
+            values = await asyncio.to_thread(self._fetch_station_secrets)
+        except (OSError, HTTPException, ValueError, KeyError) as exc:
+            if isinstance(exc, HTTPError):
+                exc.close()
+            # Runs snapshot only fresh values; require_secret rejects an absent
+            # credential while stages without secrets can still use MQTT.
+            log.warning("basic_station.secrets_pull_failed", error=type(exc).__name__, retry_seconds=5)
+            return False
         self._settings.station_secrets = values
         log.info("basic_station.secrets_loaded", count=len(values))
+        return True
+
+    async def _retry_station_secrets(self, retry_seconds: float = 5) -> None:
+        while True:
+            await asyncio.sleep(retry_seconds)
+            if await self._load_station_secrets():
+                return
 
     def _fetch_station_secrets(self) -> dict[str, str]:
         url = f"{self._settings.api_base_url.rstrip('/')}/api/v1/stations/{self._settings.station_id}/secrets/values"
@@ -531,7 +553,10 @@ class BasicStation:
             body = response.read(1_048_577)
         if len(body) > 1_048_576:
             raise ValueError("station secret response is too large")
-        values = json.loads(body)["secrets"]
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("invalid station secret response")
+        values = payload["secrets"]
         if not isinstance(values, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items()):
             raise ValueError("invalid station secret response")
         return values

@@ -86,8 +86,15 @@ Station-specific task secrets can be configured in the HTF operator UI. With
 reconnecting, then exposes them to built-in and custom stages through
 `context.require_secret("INFUSE_API_KEY")` or the read-only `context.secrets`
 mapping. The runtime keeps the values in memory and does not add them to run
-outputs or logs. A failed authenticated pull stops station startup instead of
-running with an old value. Restart or reconnect after changing a secret.
+outputs or logs. A failed pull clears old values, keeps MQTT available and retries
+in the background every five seconds. Runs use a snapshot of the available values;
+`require_secret` fails when a value is unavailable. Declare
+`required_secrets: [INFUSE_API_KEY]` on stages that need managed secrets: the runtime checks every
+stage's declarations before any stage in the plan runs, so neither hardware nor
+HTTP work starts without those values. Add these declarations to existing custom
+plans that use managed secrets before upgrading. Custom stages should use
+`require_secret` instead of an optional mapping lookup for required credentials. Restart or
+reconnect after changing a secret; values are never reused after a failed pull.
 
 ## Station credentials
 
@@ -214,11 +221,13 @@ stages:
 
   - name: Show ID
     kind: print
+    interpolate: true
     message: 'ID=${provisioning.infuse_id}'
     wait_seconds: 0
 
   - name: Register with external service
     kind: http_request
+    interpolate: true
     http:
       url: https://manufacturing.example.com/devices
       method: POST
@@ -265,9 +274,10 @@ including leading zeros.
 
 Reservation writes `provisioning.<variable>` and `reservation.<variable>` into
 this run's context. `${provisioning.infuse_id}`, `${external.receipt}`, `${dut_id}`,
-and `${run_id}` can be used in string settings, including nested HTTP JSON and
-headers. `${context.provisioning.infuse_id}` is an equivalent explicit context
-reference. References resolve once immediately before each stage; a missing
+and `${run_id}` can be used in string settings on stages with `interpolate: true`,
+including nested HTTP JSON and headers. The default is `false`, preserving literal
+`${...}` text in existing plans. `${context.provisioning.infuse_id}` is an
+equivalent explicit context reference. References resolve once immediately before each stage; a missing
 reference fails the stage. Stage names, kinds, programmer routing, variable
 lists, locks and dependency declarations remain static. Numeric configuration
 fields such as timeout and width must be literal numbers. Uppercase `${ENV_VAR}`
@@ -393,7 +403,28 @@ later stages continue to work. A missing mapped output produces a capture warnin
 rather than reusing a previous stage's value or changing the test outcome.
 
 Plans support at most 256 stages per lane, and stage names are limited to 128
-characters. Both YAML and Python settings enforce these report source limits.
+UTF-16 code units (for example, 64 emoji). Both YAML and Python settings enforce
+these server report and database limits. Older station versions accepted larger
+plans, but the server cannot safely persist their reports. Before upgrading,
+validate each local config and exported server runtime YAML without connecting:
+
+```sh
+uv run htf-station check-config samples/basic-station/config.yaml
+uv run htf-station check-config station.yaml --runtime exported-runtime.yaml
+```
+
+Set the same environment variables used by your station. Shorten overlong names
+consistently in `after` dependencies and split oversized plans into lane plans
+before release; names are never truncated automatically. Python-configured
+stations can construct `Settings` offline to run the same bounds checks.
+`Settings.plugins` and the `programmers.base.Programmer` protocol remain available
+for existing custom scripts; plugin names are metadata, not automatic imports.
+
+Deploy the capture-capable server before upgrading stations or enabling `capture`.
+Older servers accept legacy reports but cannot acknowledge capture envelopes,
+which would stay in the new station's outbox. Existing station versions can keep
+running with the new server. Credential-bearing HTTP clients reject redirects;
+use the final API URL directly rather than relying on an HTTP-to-HTTPS redirect.
 A stage can capture up to 64 observations (1024 per run); keys/source names are limited to 128
 characters and values to 512 characters. Repeated identical captures in one stage
 with identical verification/subtest metadata are coalesced. Changed metadata is
