@@ -42,6 +42,8 @@ class StageSettings(BaseModel):
     name: str
     kind: str = "print"
     message: str = "testing"
+    interpolate: bool = False
+    required_secrets: tuple[str, ...] = Field(default=(), repr=False)
     wait_seconds: float = 5.0
     programmer: str | None = None
     firmware_id: str | None = None
@@ -150,6 +152,7 @@ class Settings(BaseSettings):
 
     org_id: str = Field(..., description="UUID of the org this station belongs to")
     station_id: str = Field(..., description="UUID assigned to this station by the server")
+    plugins: tuple[str, ...] = ()
     programmers: tuple[ProgrammerSettings, ...] = ()
     stages: tuple[StageSettings, ...] = Field(max_length=256, default_factory=lambda: (
         StageSettings(name="print testing"),
@@ -207,6 +210,7 @@ def load_settings_from_yaml(path: Path) -> Settings:
         ),
         org_id=str(_required(station, "org_id")),
         station_id=str(_required(station, "station_id")),
+        plugins=_str_tuple(data.get("plugins")),
         programmers=programmers,
         stages=stages,
         lanes=lanes,
@@ -453,6 +457,8 @@ def _parse_stage_settings_item_unchecked(
         name=name.strip(),
         kind=str(raw_stage.get("kind", "print")),
         message=str(raw_stage.get("message", "testing")),
+        interpolate=raw_stage.get("interpolate", False),
+        required_secrets=_str_tuple(raw_stage.get("required_secrets", raw_stage.get("requiredSecrets"))),
         wait_seconds=float(raw_stage.get("wait_seconds", raw_stage.get("waitSeconds", 5))),
         programmer=_optional_str(raw_stage.get("programmer")) or default_programmer,
         firmware_id=_optional_str(raw_stage.get("firmware_id", raw_stage.get("firmwareId"))),

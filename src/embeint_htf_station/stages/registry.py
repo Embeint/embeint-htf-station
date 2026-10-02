@@ -23,7 +23,7 @@ def create_stage(settings: StageSettings, factories: Mapping[str, StageFactory] 
     factory = stage_factories.get(settings.kind)
     if factory is None:
         return UnsupportedStage(settings)
-    if "${" not in settings.model_dump_json():
+    if not settings.interpolate or "${" not in settings.model_dump_json():
         return factory(settings)
     return _ConfiguredStage(settings, factory)
 
@@ -37,7 +37,7 @@ class _ConfiguredStage:
         try:
             data = self._settings.model_dump(by_alias=True)
             # Identity, routing, dependency and lock names remain static.
-            static = {"name", "kind", "programmer", "after", "locks", "variables"}
+            static = {"name", "kind", "programmer", "after", "locks", "variables", "required_secrets"}
             if self._settings.kind == "print":
                 static.add("message")  # PrintStage also supports direct use.
             resolved = {key: value if key in static else resolve_value(value, context) for key, value in data.items()}

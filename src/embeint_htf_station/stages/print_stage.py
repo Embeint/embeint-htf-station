@@ -16,7 +16,8 @@ class PrintStage:
         started_at = datetime.now(UTC)
         await logger.log("info", "stage started")
 
-        await logger.log("info", resolve_value(self._settings.message, context))
+        message = resolve_value(self._settings.message, context) if self._settings.interpolate else self._settings.message
+        await logger.log("info", message)
         await asyncio.sleep(self._settings.wait_seconds)
 
         finished_at = datetime.now(UTC)

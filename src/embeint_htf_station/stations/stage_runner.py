@@ -133,6 +133,11 @@ class StageRunner:
         active_started_at: datetime | None = None
         await logger.start()
         try:
+            # Check all declared dependencies before any stage can touch hardware
+            # or an external service. This run keeps its immutable secret snapshot.
+            for stage_settings in run_stages:
+                for name in stage_settings.required_secrets:
+                    run_context.require_secret(name)
             await self._publish_heartbeat(client, "running", run_id, [activity] if activity else None)
             await logger.log("info", f"starting basic test for DUT {dut_id} on lane {lane}")
             for index, stage in enumerate(run_stages):

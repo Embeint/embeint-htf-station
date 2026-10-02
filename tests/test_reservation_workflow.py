@@ -81,10 +81,12 @@ stages:
     variables: [infuse_id]
   - name: Print ID
     kind: print
+    interpolate: true
     message: 'ID=${{provisioning.infuse_id}}'
     wait_seconds: 0
   - name: External service
     kind: http_request
+    interpolate: true
     http:
       url: {url}{path}
       timeout_seconds: 0.1
@@ -97,6 +99,7 @@ stages:
         external.receipt: receipt.id
   - name: Print receipt
     kind: print
+    interpolate: true
     message: 'Receipt=${{external.receipt}}'
     wait_seconds: 0
   - name: Commit
@@ -150,7 +153,7 @@ async def test_failed_prerequisite_blocks_service_and_commit(monkeypatch, servic
     monkeypatch.setattr(id_pool, 'allocate_variables', lambda *args: PoolReservation({'infuse_id': '1'}, {'infuse_id': str(uuid4())}))
     monkeypatch.setattr(id_pool, 'commit_variables', lambda *args: pytest.fail('Must not commit'))
     stages = list(workflow(url))
-    stages.insert(1, StageSettings(name='Prerequisite', kind='missing' if failure == 'unknown-stage' else 'print', message='${missing.value}', wait_seconds=0))
+    stages.insert(1, StageSettings(name='Prerequisite', kind='missing' if failure == 'unknown-stage' else 'print', message='${missing.value}', wait_seconds=0, interpolate=True))
     result = await BasicStation(station_settings())._run_test(Publisher(), 'DUT', str(uuid4()), stages=stages)
     assert result.outcome in {'failed', 'error'}
     assert requests == []
@@ -302,6 +305,7 @@ stages:
     variables: [infuse_id]
   - name: Verify
     kind: print
+    interpolate: true
     message: 'Verified ${{provisioning.infuse_id}}'
     wait_seconds: 0
   - name: Commit
@@ -427,6 +431,6 @@ async def test_arbitrary_stage_string_settings_resolve_from_context():
             return None
     context = StageContext('DUT')
     context.set_output('Reserve', 'provisioning.id', '00001')
-    stage = create_stage(StageSettings(name='Custom', kind='custom', path='/ids/${provisioning.id}'), {'custom': Custom})
+    stage = create_stage(StageSettings(name='Custom', kind='custom', path='/ids/${provisioning.id}', interpolate=True), {'custom': Custom})
     await stage.run(Logger(), context)
     assert seen == ['/ids/00001']

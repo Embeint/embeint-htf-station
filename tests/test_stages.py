@@ -58,8 +58,7 @@ async def test_station_secret_pull_replaces_values_and_fails_closed(monkeypatch)
         raise TimeoutError()
 
     monkeypatch.setattr(station, "_fetch_station_secrets", unavailable)
-    with pytest.raises(TimeoutError):
-        await station._load_station_secrets()
+    assert await station._load_station_secrets() is False
     assert station._settings.station_secrets == {}
 
 
