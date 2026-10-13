@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import zipfile
@@ -141,30 +142,33 @@ class FirmwareCache:
             raise FirmwareError("firmware stage requires a path inside the firmware archive")
 
         output_path = self._cache_dir / firmware_id / version.id / "extracted" / normalized_path
-        if output_path.exists() and output_path.stat().st_mtime >= archive.stat().st_mtime:
+        if "*" not in normalized_path and self._is_cached_file(output_path, archive):
             return output_path
 
         suffix = archive.suffix.lower()
         if suffix == ".zip":
-            self._extract_zip_file(archive, normalized_path, output_path)
+            return self._extract_zip_file(archive, normalized_path, output_path)
         elif suffix == ".7z":
-            self._extract_7z_file(archive, normalized_path, output_path)
+            return self._extract_7z_file(archive, normalized_path, output_path)
         else:
             raise FirmwareError(
                 f"unsupported firmware archive type for {archive.name}; expected .zip or .7z",
             )
-        return output_path
 
-    def _extract_zip_file(self, archive: Path, path_in_archive: str, output_path: Path) -> None:
+    def _extract_zip_file(self, archive: Path, path_in_archive: str, output_path: Path) -> Path:
         with zipfile.ZipFile(archive) as zf:
             member = self._find_zip_member(zf, path_in_archive)
             if member is None:
                 raise FirmwareError(f"firmware archive does not contain {path_in_archive}")
+            output_path = self._matched_output_path(output_path, path_in_archive, member)
+            if self._is_cached_file(output_path, archive):
+                return output_path
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member) as source, output_path.open("wb") as output:
                 shutil.copyfileobj(source, output)
+        return output_path
 
-    def _extract_7z_file(self, archive: Path, path_in_archive: str, output_path: Path) -> None:
+    def _extract_7z_file(self, archive: Path, path_in_archive: str, output_path: Path) -> Path:
         seven_zip = self._seven_zip_executable()
         if seven_zip is None:
             raise FirmwareError("extracting .7z firmware archives requires 7z, 7zz, or 7za on PATH")
@@ -189,8 +193,12 @@ class FirmwareCache:
             if extracted is None:
                 raise FirmwareError(f"firmware archive does not contain {path_in_archive}")
 
+            output_path = self._matched_output_path(
+                output_path, path_in_archive, extracted.relative_to(extract_root).as_posix(),
+            )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(extracted, output_path)
+            return output_path
         except subprocess.TimeoutExpired as exc:
             raise FirmwareError(f"timed out extracting {archive.name} with 7z") from exc
         finally:
@@ -199,6 +207,10 @@ class FirmwareCache:
     @staticmethod
     def _find_zip_member(zf: zipfile.ZipFile, path_in_archive: str) -> str | None:
         normalized = FirmwareCache._normalize_archive_path(path_in_archive)
+        if "*" in normalized:
+            return FirmwareCache._find_wildcard_match(
+                [member.filename for member in zf.infolist() if not member.is_dir()], normalized,
+            )
         names = set(zf.namelist())
         if normalized in names:
             return normalized
@@ -208,6 +220,12 @@ class FirmwareCache:
     @staticmethod
     def _find_extracted_file(root: Path, path_in_archive: str) -> Path | None:
         normalized = FirmwareCache._normalize_archive_path(path_in_archive)
+        if "*" in normalized:
+            match = FirmwareCache._find_wildcard_match(
+                [candidate.relative_to(root).as_posix() for candidate in root.rglob("*") if candidate.is_file()],
+                normalized,
+            )
+            return root / match if match is not None else None
         exact = root / normalized
         if exact.is_file():
             return exact
@@ -217,6 +235,34 @@ class FirmwareCache:
             if candidate.is_file() and _path_has_suffix(candidate.relative_to(root), suffix):
                 return candidate
         return None
+
+    @staticmethod
+    def _find_wildcard_match(names: list[str], pattern: str) -> str | None:
+        pattern_parts = Path(pattern).parts
+        expressions = [re.compile(re.escape(part).replace(r"\*", ".*")) for part in pattern_parts]
+        matches = []
+        for name in names:
+            parts = Path(name).parts
+            if len(parts) >= len(pattern_parts) and all(
+                expression.fullmatch(part)
+                for expression, part in zip(expressions, parts[-len(pattern_parts):], strict=True)
+            ):
+                matches.append(name)
+        if len(matches) > 1:
+            raise FirmwareError(f"firmware archive pattern {pattern} matches multiple files: {', '.join(sorted(matches))}")
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _matched_output_path(output_path: Path, pattern: str, member: str) -> Path:
+        if "*" not in pattern:
+            return output_path
+        normalized_member = FirmwareCache._normalize_archive_path(member)
+        depth = len(Path(pattern).parts)
+        return output_path.parents[depth - 1].joinpath(*Path(normalized_member).parts[-depth:])
+
+    @staticmethod
+    def _is_cached_file(output_path: Path, archive: Path) -> bool:
+        return output_path.is_file() and output_path.stat().st_mtime >= archive.stat().st_mtime
 
     @staticmethod
     def _normalize_archive_path(path_in_archive: str) -> str:

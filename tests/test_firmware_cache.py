@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import subprocess
 import zipfile
 from pathlib import Path
 from urllib.request import Request
@@ -122,6 +123,100 @@ def test_firmware_cache_reports_missing_7z_extractor(tmp_path: Path, monkeypatch
 
     with pytest.raises(FirmwareError, match="requires 7z, 7zz, or 7za"):
         cache.get_file("firmware-1", "latest", "zephyr/zephyr.hex")
+
+
+@pytest.fixture(params=["zip", "7z"])
+def wildcard_cache(tmp_path: Path, request: pytest.FixtureRequest):
+    def create(files: dict[str, bytes]) -> FakeFirmwareCache:
+        if request.param == "zip":
+            archive_bytes = _zip_bytes(files)
+        else:
+            seven_zip = FirmwareCache._seven_zip_executable()
+            if seven_zip is None:
+                pytest.skip("7z is unavailable")
+            source = tmp_path / "source"
+            source.mkdir(exist_ok=True)
+            for name, content in files.items():
+                file = source / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(content)
+            archive = tmp_path / "source.7z"
+            subprocess.run(
+                (seven_zip, "a", str(archive), "."), cwd=source, capture_output=True, check=True,
+            )
+            archive_bytes = archive.read_bytes()
+        return FakeFirmwareCache(
+            Settings(org_id="org-1", station_id="station-1", firmware_cache_dir=str(tmp_path / "cache")),
+            archive_bytes,
+            hashlib.sha256(archive_bytes).hexdigest(),
+            file_name=f"firmware.{request.param}",
+        )
+    return create
+
+
+@pytest.mark.parametrize("prefix", ["", "release/", "release/build/"])
+def test_firmware_wildcard_resolves_one_file_with_real_filename(wildcard_cache, prefix: str) -> None:
+    cache = wildcard_cache({
+        f"{prefix}steller-asset_tracker-v1.2.hex": b"hex",
+        f"{prefix}steller-asset_tracker-v1.2.bin": b"binary",
+        f"{prefix}other.hex": b"other",
+        f"{prefix}steller-asset_tracker-dir.hex/ignored.txt": b"directory",
+    })
+
+    extracted = cache.get_file("firmware-1", "latest", "steller-asset_tracker-*.hex")
+
+    assert extracted.name == "steller-asset_tracker-v1.2.hex"
+    assert extracted.read_bytes() == b"hex"
+    assert cache.get_file("firmware-1", "latest", "steller-asset_tracker-*.hex") == extracted
+    assert cache.downloads == 1
+
+
+def test_firmware_wildcard_preserves_requested_subdirectory(wildcard_cache) -> None:
+    cache = wildcard_cache({"release/build/steller-asset_tracker-v1.hex": b"hex"})
+
+    extracted = cache.get_file("firmware-1", "latest", "build/steller-asset_tracker-*.hex")
+
+    assert extracted.relative_to(cache._cache_dir).as_posix() == (
+        "firmware-1/version-1/extracted/build/steller-asset_tracker-v1.hex"
+    )
+
+
+def test_firmware_wildcard_reports_no_matches(wildcard_cache) -> None:
+    cache = wildcard_cache({"other.hex": b"other", "steller-asset_tracker-v1.bin": b"binary"})
+
+    with pytest.raises(FirmwareError, match=r"does not contain steller-asset_tracker-\*\.hex"):
+        cache.get_file("firmware-1", "latest", "steller-asset_tracker-*.hex")
+
+
+@pytest.mark.parametrize("second", ["steller-asset_tracker-v2.hex", "nested/steller-asset_tracker-v1.hex"])
+def test_firmware_wildcard_rejects_multiple_matches_even_with_cached_file(wildcard_cache, second: str) -> None:
+    cache = wildcard_cache({"steller-asset_tracker-v1.hex": b"first", second: b"second"})
+    # An earlier exact-path request must not bypass wildcard ambiguity checking.
+    cache.get_file("firmware-1", "latest", "steller-asset_tracker-v1.hex")
+
+    with pytest.raises(FirmwareError, match="matches multiple files") as exc:
+        cache.get_file("firmware-1", "latest", "steller-asset_tracker-*.hex")
+
+    assert "steller-asset_tracker-v1.hex" in str(exc.value)
+    assert second in str(exc.value)
+
+
+def test_firmware_wildcard_does_not_match_across_directory_boundaries(wildcard_cache) -> None:
+    cache = wildcard_cache({"steller-asset_tracker-build/nested.hex": b"hex"})
+
+    with pytest.raises(FirmwareError, match="does not contain"):
+        cache.get_file("firmware-1", "latest", "steller-asset_tracker-*.hex")
+
+
+def test_firmware_zip_wildcard_rejects_unsafe_matching_member(tmp_path: Path) -> None:
+    archive_bytes = _zip_bytes({"../steller-asset_tracker-v1.hex": b"hex"})
+    cache = FakeFirmwareCache(
+        Settings(org_id="org-1", station_id="station-1", firmware_cache_dir=str(tmp_path)),
+        archive_bytes, hashlib.sha256(archive_bytes).hexdigest(),
+    )
+
+    with pytest.raises(FirmwareError, match="invalid firmware archive path"):
+        cache.get_file("firmware-1", "latest", "steller-asset_tracker-*.hex")
 
 
 @pytest.mark.parametrize(

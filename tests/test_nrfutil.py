@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import zipfile
 
 import pytest
 
-from embeint_htf_station.config import ProgrammerSettings, StageSettings
+from embeint_htf_station.config import ProgrammerSettings, Settings, StageSettings
+from embeint_htf_station.firmware import FirmwareCache, FirmwareVersion
 from embeint_htf_station.stages import StageContext
 from embeint_htf_station.stages.nrfutil import (
     FirmwareFlashStage,
@@ -71,6 +73,43 @@ async def test_firmware_flash_uses_resolved_file_and_injected_runner() -> None:
 
     assert result.outcome == "passed"
     assert commands == [("nrfutil", "device", "program", "--firmware", "/cache/app.hex")]
+
+
+@pytest.mark.parametrize("match_count", [0, 1, 2])
+async def test_firmware_flash_requires_one_wildcard_match_before_programming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, match_count: int,
+) -> None:
+    archive = tmp_path / "firmware.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for index in range(match_count):
+            zf.writestr(f"release/steller-asset_tracker-v{index}.hex", b"hex")
+    version = FirmwareVersion("version-1", "v1", archive.name, "", "/download")
+    cache = FirmwareCache(Settings(org_id="org-1", station_id="station-1", firmware_cache_dir=str(tmp_path)))
+    monkeypatch.setattr(cache, "_resolve", lambda *_args: version)
+    monkeypatch.setattr(cache, "_cache_archive", lambda *_args: archive)
+    commands: list[tuple[str, ...]] = []
+
+    async def run(command, _logger) -> None:
+        commands.append(tuple(command))
+
+    stage = FirmwareFlashStage(
+        StageSettings(name="flash", firmware_id="firmware-1", path="steller-asset_tracker-*.hex"),
+        {}, cache, run,
+    )
+    logger = Logger()
+
+    result = await stage.run(logger, StageContext("DUT"))
+
+    if match_count == 1:
+        assert result.outcome == "passed"
+        assert len(commands) == 1
+        assert commands[0][:4] == ("nrfutil", "device", "program", "--firmware")
+        assert Path(commands[0][4]).name == "steller-asset_tracker-v0.hex"
+    else:
+        assert result.outcome == "failed"
+        assert commands == []
+        assert logger.entries[-1][0] == "error"
+        assert ("does not contain" if match_count == 0 else "matches multiple files") in logger.entries[-1][1]
 
 
 async def test_firmware_flash_rejects_missing_archive_path_without_running_process() -> None:

@@ -206,6 +206,26 @@ A complete production transport sample is in `samples/production-mtls/config.yam
 After installing the credentials and setting station environment variables, run
 `uv run python samples/basic-station/main.py --listen --config samples/production-mtls/config.yaml`.
 
+## Firmware filenames
+
+The `firmware_flash` stage's `path` supports `*` in firmware filenames inside
+ZIP and 7z archives, for example:
+
+```yaml
+stages:
+  - name: flash
+    kind: firmware_flash
+    firmware_id: your-firmware-id
+    firmware_version: latest
+    path: 'steller-asset_tracker-*.hex'
+```
+
+The pattern must match exactly one file. No matches or multiple matches fail
+the stage before programming; errors for multiple matches list the filenames.
+Files may be nested inside the archive. Include a subdirectory in `path` to
+narrow the match, such as `build/steller-asset_tracker-*.hex`. The programmer
+receives the resolved file with its actual filename.
+
 ## Project ID pools
 
 Project variables use uploaded CSV pools. Configure `HTF_API_KEY` and
